@@ -1,0 +1,3 @@
+"C:\Program Files\JetBrains\CLion 2023.2.2\bin\cmake\win\x64\bin\cmake.exe" -E rm -f CMakeFiles\GraphicsProject.dir/objects.a
+C:\MinGW\bin\ar.exe qc CMakeFiles\GraphicsProject.dir/objects.a @CMakeFiles\GraphicsProject.dir\objects1.rsp
+C:\MinGW\bin\c++.exe -g -Wl,--whole-archive CMakeFiles\GraphicsProject.dir/objects.a -Wl,--no-whole-archive -o GraphicsProject.exe -Wl,--out-implib,libGraphicsProject.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\GraphicsProject.dir\linkLibs.rsp

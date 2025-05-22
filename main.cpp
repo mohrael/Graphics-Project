@@ -6,6 +6,9 @@
 #include <commdlg.h>
 #include <locale>
 #include <codecvt>
+#include <climits>
+#include <stack>
+
 using namespace std;
 
 // Menu command IDs
@@ -26,11 +29,18 @@ using namespace std;
 #define MODBRES_CIRCLE 305
 #define SAVE 401
 #define LOAD 402
+#define FILL_RECURSIVE  501
+#define FILL_NONRECURSIVE  502
+#define FILL_CANCEL   503
 
 
-enum ShapeType { LINE ,CIRCLE};
+
+
+enum ShapeType { LINE ,CIRCLE , FILL};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
 enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
+enum FillAlgorithm { FLOOD_FILL_RECURSIVE, FLOOD_FILL_NONRECURSIVE };
+
 
 struct Shape {
     ShapeType type;
@@ -38,9 +48,11 @@ struct Shape {
     COLORREF color;
     LineAlgorithm linealgo;
     CircleAlgorithm circleAlgo;
+    COLORREF fillColor;
+    COLORREF currColor;
+    FillAlgorithm fillAlgo;
     int quarter = 1;
 };
-
 vector<Shape> shapes;
 bool waitingForSecondClick = false;
 
@@ -370,13 +382,51 @@ void generateQuarterPolygon(HDC hdc,int xc, int yc, int R, int quarter, vector<P
 
 
 //////////////////////////////////////////////////////////////////////////////////////////
+//Filling Algorithms:
+//1.Recursive floof fill
+void FloodFill1(HDC hdc , int x ,int y , COLORREF currCol , COLORREF FillCol ) {
+    COLORREF c = GetPixel(hdc, x, y);
+    if (c != currCol || c == FillCol) return;
+    else if (c == currCol) {
+        SetPixel(hdc, x, y, FillCol);
+        FloodFill1(hdc, x + 1, y, currCol, FillCol);  //right
+        FloodFill1(hdc, x, y + 1, currCol, FillCol);  //down
+        FloodFill1(hdc, x - 1, y, currCol, FillCol);   //left
+        FloodFill1(hdc, x, y - 1, currCol, FillCol);    //up
+    }
+}
+
+//2.non-Recursive flood fill
+struct point{
+    int x ; int y;
+    point(int x=0 , int y=0):x(x),y(y){}
+};
+void FloodFill2(HDC hdc , int x ,int y , COLORREF currCol , COLORREF FillCol ) {
+    stack<point> points;
+    points.push(point(x, y));
+    while (!points.empty()) {
+        point p = points.top();
+        points.pop();
+
+        COLORREF c = GetPixel(hdc, p.x, p.y);
+        if (c == FillCol || c != currCol) continue;
+        SetPixel(hdc, p.x, p.y, FillCol);
+        points.emplace(p.x + 1, p.y);
+        points.emplace(p.x - 1, p.y);
+        points.emplace(p.x, p.y + 1);
+        points.emplace(p.x, p.y - 1);
+
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////
 
 int startX, startY;
 LineAlgorithm currentAlgo = LINE_DDA;
 CircleAlgorithm currentCircleAlgo = CIRCLE_CARTESIAN;
+FillAlgorithm currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
 
 COLORREF currentColor = RGB(0, 0, 0);
-
 void DrawShape(HDC hdc, const Shape& shape) {
     if (shape.type == LINE) {
         switch (shape.linealgo) {
@@ -397,16 +447,16 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 CircleDrawing(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
             case CIRCLE_POLAR:
-                PolarCircle(hdc , shape.x1, shape.y1, r, shape.color);
+                PolarCircle(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
             case CIRCLE_ITERPOLAR:
-                IterPolar(hdc , shape.x1, shape.y1, r, shape.color);
+                IterPolar(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
             case CIRCLE_BRES:
-                BresCircle(hdc , shape.x1, shape.y1, r, shape.color);
+                BresCircle(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
             case CIRCLE_MODBRES:
-                ModBresCircle(hdc , shape.x1, shape.y1, r, shape.color);
+                ModBresCircle(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
             case FILL_CIRCLE_QUARTER:
                 vector<Point> polygon;
@@ -415,257 +465,292 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 confex(hdc, polygon.data(), polygon.size(), shape.color);
                 break;
 
-
-
+        }
+    }
+    else if (shape.type == FILL) {
+        if (shape.fillAlgo == FLOOD_FILL_RECURSIVE) {
+            FloodFill1(hdc, shape.x1, shape.y1, shape.currColor, shape.fillColor);
+        } else if (shape.fillAlgo == FLOOD_FILL_NONRECURSIVE) {
+            FloodFill2(hdc, shape.x1, shape.y1, shape.currColor, shape.fillColor);
         }
     }
 }
 
-bool GetFileNameFromDialog(HWND hwnd, LPWSTR filename, DWORD flags, bool saveDialog = false) {
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"Binary Files\0*.dat\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = flags;
-    ofn.lpstrDefExt = L"dat";
 
-    if (saveDialog)
-        return GetSaveFileNameW(&ofn);
-    else
-        return GetOpenFileNameW(&ofn);
-}
+    bool GetFileNameFromDialog(HWND hwnd, LPWSTR filename, DWORD flags, bool saveDialog = false) {
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter = L"Binary Files\0*.dat\0All Files\0*.*\0";
+        ofn.lpstrFile = filename;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = flags;
+        ofn.lpstrDefExt = L"dat";
 
-
-void SaveShapesToFile(HWND hwnd) {
-    wchar_t filename[MAX_PATH] = L"";
-    if (GetFileNameFromDialog(hwnd, filename, OFN_OVERWRITEPROMPT, true)) {
-        // Convert wide string to narrow string (UTF-8)
-        wstring_convert<codecvt_utf8<wchar_t>> converter;
-        string narrowFilename = converter.to_bytes(filename);
-
-        ofstream out(narrowFilename, ios::binary);
-        if (!out.is_open()) return;
-
-        size_t size = shapes.size();
-        out.write(reinterpret_cast<const char*>(&size), sizeof(size));
-        for (const auto& shape : shapes) {
-            out.write(reinterpret_cast<const char*>(&shape), sizeof(Shape));
-        }
-        out.close();
+        if (saveDialog)
+            return GetSaveFileNameW(&ofn);
+        else
+            return GetOpenFileNameW(&ofn);
     }
-}
 
-void LoadShapesFromFile(HWND hwnd) {
-    wchar_t filename[MAX_PATH] = L"";
-    if (GetFileNameFromDialog(hwnd, filename, OFN_FILEMUSTEXIST, false)) {
-        // Convert wide string to narrow string (UTF-8)
-        wstring_convert<codecvt_utf8<wchar_t>> converter;
-        string narrowFilename = converter.to_bytes(filename);
 
-        ifstream in(narrowFilename, ios::binary);
-        if (!in.is_open()) return;
+    void SaveShapesToFile(HWND hwnd) {
+        wchar_t filename[MAX_PATH] = L"";
+        if (GetFileNameFromDialog(hwnd, filename, OFN_OVERWRITEPROMPT, true)) {
+            // Convert wide string to narrow string (UTF-8)
+            wstring_convert<codecvt_utf8<wchar_t>> converter;
+            string narrowFilename = converter.to_bytes(filename);
 
-        size_t size;
-        in.read(reinterpret_cast<char*>(&size), sizeof(size));
-        shapes.resize(size);
-        for (size_t i = 0; i < size; ++i) {
-            in.read(reinterpret_cast<char*>(&shapes[i]), sizeof(Shape));
+            ofstream out(narrowFilename, ios::binary);
+            if (!out.is_open()) return;
+
+            size_t size = shapes.size();
+            out.write(reinterpret_cast<const char *>(&size), sizeof(size));
+            for (const auto &shape: shapes) {
+                out.write(reinterpret_cast<const char *>(&shape), sizeof(Shape));
+            }
+            out.close();
         }
-        in.close();
-        InvalidateRect(hwnd, NULL, TRUE);  // Redraw window
     }
-}
 
+    void LoadShapesFromFile(HWND hwnd) {
+        wchar_t filename[MAX_PATH] = L"";
+        if (GetFileNameFromDialog(hwnd, filename, OFN_FILEMUSTEXIST, false)) {
+            // Convert wide string to narrow string (UTF-8)
+            wstring_convert<codecvt_utf8<wchar_t>> converter;
+            string narrowFilename = converter.to_bytes(filename);
 
+            ifstream in(narrowFilename, ios::binary);
+            if (!in.is_open()) return;
 
-
-
-bool drawingCircle = false; // set to true when user selects circle algorithm
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    HDC hdc;
-    switch (msg) {
-        case WM_CREATE: {                                      //menu
-            HMENU MainMenu = CreateMenu();
-            //colors
-            HMENU Colors = CreateMenu();
-            AppendMenu(Colors, MF_STRING, BLACK, "Black");
-            AppendMenu(Colors, MF_STRING, RED, "Red");
-            AppendMenu(Colors, MF_STRING, GREEN, "Green");
-            AppendMenu(Colors, MF_STRING, BLUE, "Blue");
-            AppendMenu(Colors, MF_STRING, YELLOW, "Yellow");
-            AppendMenu(Colors, MF_STRING, PINK, "pink");
-
-            //line
-            HMENU LineAlgorithms = CreateMenu();
-            AppendMenu(LineAlgorithms, MF_STRING, DDA_LINE, "DDA");
-            AppendMenu(LineAlgorithms, MF_STRING, MIDPOINT_LINE, "Midpoint");
-            AppendMenu(LineAlgorithms, MF_STRING, PARAMETRIC_LINE, "Parametric");
-            //circle
-            HMENU CircleAlgorithms = CreateMenu();
-            AppendMenu(CircleAlgorithms, MF_STRING, CARTESIAN_CIRCLE, "Cartesian Eq Circle");
-            AppendMenu(CircleAlgorithms, MF_STRING, POLAR_CIRCLE, "Normal Polar Circle");
-            AppendMenu(CircleAlgorithms, MF_STRING, ITERPOLAR_CIRCLE, "Iterative Polar Circle");
-            AppendMenu(CircleAlgorithms, MF_STRING, BRES_CIRCLE, "Bresenham Circle");
-            AppendMenu(CircleAlgorithms, MF_STRING, MODBRES_CIRCLE, "Modified Bresenham Circle");
-            AppendMenu(CircleAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
-
-            //main menu
-            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) Colors, "Color");
-            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) LineAlgorithms, "Line Algorithm");
-            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
-
-            AppendMenu(MainMenu, MF_STRING, 401, "Save");
-            AppendMenu(MainMenu, MF_STRING, 402, "Load");
-            AppendMenu(MainMenu, MF_STRING, CLEAR, "Clear");
-
-            SetMenu(hwnd, MainMenu);
+            size_t size;
+            in.read(reinterpret_cast<char *>(&size), sizeof(size));
+            shapes.resize(size);
+            for (size_t i = 0; i < size; ++i) {
+                in.read(reinterpret_cast<char *>(&shapes[i]), sizeof(Shape));
+            }
+            in.close();
+            InvalidateRect(hwnd, NULL, TRUE);  // Redraw window
         }
-            break;
+    }
 
 
-        case WM_COMMAND: {
-            switch (LOWORD(wp)) {
-                case CLEAR:
-                    shapes.clear();
-                    InvalidateRect(hwnd, NULL, TRUE);
-                    break;
-                case SAVE:
-                    SaveShapesToFile(hwnd);
-                    break;
-                case LOAD:
-                    LoadShapesFromFile(hwnd);
-                    InvalidateRect(hwnd, NULL, TRUE); // Redraw
-                    break;
-                case BLACK:
-                    currentColor = RGB(0, 0, 0);
-                    break;
-                case RED:
-                    currentColor = RGB(255, 0, 0);
-                    break;
-                case GREEN:
-                    currentColor = RGB(0, 255, 0);
-                    break;
-                case BLUE:
-                    currentColor = RGB(0, 0, 255);
-                    break;
-                case YELLOW:
-                    currentColor = RGB(255, 255, 0);
-                    break;
-                case PINK:
-                    currentColor = RGB(255, 192, 203);
-                    break;
-                case DDA_LINE:
-                    currentAlgo = LINE_DDA;
-                    break;
-                case MIDPOINT_LINE:
-                    currentAlgo = LINE_MIDPOINT;
-                    break;
-                case PARAMETRIC_LINE:
-                    currentAlgo = LINE_PARAMETRIC;
-                    break;
-                case CARTESIAN_CIRCLE:
-                    drawingCircle = true;
-                    currentCircleAlgo = CIRCLE_CARTESIAN;
-                    break;
-                case POLAR_CIRCLE:
-                    drawingCircle = true;
-                    currentCircleAlgo = CIRCLE_POLAR;
-                    break;
-                case ITERPOLAR_CIRCLE:
-                    drawingCircle = true;
-                    currentCircleAlgo = CIRCLE_ITERPOLAR;
-                    break;
-                case BRES_CIRCLE:
-                    drawingCircle = true;
-                    currentCircleAlgo = CIRCLE_BRES;
-                    break;
-                case MODBRES_CIRCLE:
-                    drawingCircle = true;
-                    currentCircleAlgo = CIRCLE_MODBRES;
-                    break;
-                case FILL_CIRCLE_QUARTER:
-                    drawingCircle = true;
-                    currentCircleAlgo = FILL_CIRCLE_QUARTER;
-                    break;
+    bool fillingMode = false;
+    bool drawingCircle = false;
+    COLORREF currentFillColor = RGB(255, 0, 0);
+    COLORREF currentBorderColor = RGB(0, 0, 0);
+    LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        HDC hdc;
+        switch (msg) {
+            case WM_CREATE: {                                      //menu
+                HMENU MainMenu = CreateMenu();
+                //colors
+                HMENU Colors = CreateMenu();
+                AppendMenu(Colors, MF_STRING, BLACK, "Black");
+                AppendMenu(Colors, MF_STRING, RED, "Red");
+                AppendMenu(Colors, MF_STRING, GREEN, "Green");
+                AppendMenu(Colors, MF_STRING, BLUE, "Blue");
+                AppendMenu(Colors, MF_STRING, YELLOW, "Yellow");
+                AppendMenu(Colors, MF_STRING, PINK, "pink");
+
+                //line
+                HMENU LineAlgorithms = CreateMenu();
+                AppendMenu(LineAlgorithms, MF_STRING, DDA_LINE, "DDA");
+                AppendMenu(LineAlgorithms, MF_STRING, MIDPOINT_LINE, "Midpoint");
+                AppendMenu(LineAlgorithms, MF_STRING, PARAMETRIC_LINE, "Parametric");
+                //circle
+                HMENU CircleAlgorithms = CreateMenu();
+                AppendMenu(CircleAlgorithms, MF_STRING, CARTESIAN_CIRCLE, "Cartesian Eq Circle");
+                AppendMenu(CircleAlgorithms, MF_STRING, POLAR_CIRCLE, "Normal Polar Circle");
+                AppendMenu(CircleAlgorithms, MF_STRING, ITERPOLAR_CIRCLE, "Iterative Polar Circle");
+                AppendMenu(CircleAlgorithms, MF_STRING, BRES_CIRCLE, "Bresenham Circle");
+                AppendMenu(CircleAlgorithms, MF_STRING, MODBRES_CIRCLE, "Modified Bresenham Circle");
+                AppendMenu(CircleAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
+
+                // Flood Fill
+                HMENU FillAlgorithms = CreateMenu();
+                AppendMenu(FillAlgorithms, MF_STRING, FILL_RECURSIVE, "Recursive Flood Fill");
+                AppendMenu(FillAlgorithms, MF_STRING, FILL_NONRECURSIVE, "Non-Recursive Flood Fill");
 
 
-}
-        }
-            break;
-static int circleClickStage = 0;
-        case WM_LBUTTONDOWN: {
-            int x = LOWORD(lp);
-            int y = HIWORD(lp);
-            if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
-                if (circleClickStage == 0) {
-                    startX = x;
-                    startY = y;
-                    circleClickStage = 1;
-                } else if (circleClickStage == 1) {
-                    int dx = x - startX;
-                    int dy = y - startY;
-                    int radius = (int) round(sqrt(dx * dx + dy * dy));
-                    // Temporarily store this in a global or static variable
-                    shapes.push_back({CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
-                    circleClickStage = 2;
-                } else if (circleClickStage == 2) {
-                    // Determine quarter from mouse click relative to center
-                    int quarter = 1;
-                    if (x >= startX && y <= startY) quarter = 1;
-                    else if (x <= startX && y <= startY) quarter = 2;
-                    else if (x <= startX && y >= startY) quarter = 3;
-                    else if (x >= startX && y >= startY) quarter = 4;
-                    // Update last shape
-                    shapes.back().quarter = quarter;
-                    circleClickStage = 0;
-                    drawingCircle = false;
-                    InvalidateRect(hwnd, NULL, TRUE);
+                //main menu
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) Colors, "Color");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) LineAlgorithms, "Line Algorithm");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)FillAlgorithms, "Flood Fill");
+                AppendMenu(FillAlgorithms, MF_STRING, FILL_CANCEL, "Cancel Fill Mode");
+
+
+
+                AppendMenu(MainMenu, MF_STRING, 401, "Save");
+                AppendMenu(MainMenu, MF_STRING, 402, "Load");
+                AppendMenu(MainMenu, MF_STRING, CLEAR, "Clear");
+
+                SetMenu(hwnd, MainMenu);
+            }
+                break;
+
+
+            case WM_COMMAND: {
+                switch (LOWORD(wp)) {
+                    case CLEAR:
+                        shapes.clear();
+                        InvalidateRect(hwnd, NULL, TRUE);
+                        break;
+                    case SAVE:
+                        SaveShapesToFile(hwnd);
+                        break;
+                    case LOAD:
+                        LoadShapesFromFile(hwnd);
+                        InvalidateRect(hwnd, NULL, TRUE); // Redraw
+                        break;
+                    case BLACK:
+                        currentColor = RGB(0, 0, 0);
+                        break;
+                    case RED:
+                        currentColor = RGB(255, 0, 0);
+                        break;
+                    case GREEN:
+                        currentColor = RGB(0, 255, 0);
+                        break;
+                    case BLUE:
+                        currentColor = RGB(0, 0, 255);
+                        break;
+                    case YELLOW:
+                        currentColor = RGB(255, 255, 0);
+                        break;
+                    case PINK:
+                        currentColor = RGB(255, 192, 203);
+                        break;
+                    case DDA_LINE:
+                        currentAlgo = LINE_DDA;
+                        break;
+                    case MIDPOINT_LINE:
+                        currentAlgo = LINE_MIDPOINT;
+                        break;
+                    case PARAMETRIC_LINE:
+                        currentAlgo = LINE_PARAMETRIC;
+                        break;
+                    case CARTESIAN_CIRCLE:
+                        drawingCircle = true;
+                        currentCircleAlgo = CIRCLE_CARTESIAN;
+                        break;
+                    case POLAR_CIRCLE:
+                        drawingCircle = true;
+                        currentCircleAlgo = CIRCLE_POLAR;
+                        break;
+                    case ITERPOLAR_CIRCLE:
+                        drawingCircle = true;
+                        currentCircleAlgo = CIRCLE_ITERPOLAR;
+                        break;
+                    case BRES_CIRCLE:
+                        drawingCircle = true;
+                        currentCircleAlgo = CIRCLE_BRES;
+                        break;
+                    case MODBRES_CIRCLE:
+                        drawingCircle = true;
+                        currentCircleAlgo = CIRCLE_MODBRES;
+                        break;
+                    case FILL_CIRCLE_QUARTER:
+                        drawingCircle = true;
+                        currentCircleAlgo = FILL_CIRCLE_QUARTER;
+                        break;
+                    case FILL_RECURSIVE:
+                        currentFillAlgo = FLOOD_FILL_RECURSIVE;
+                        fillingMode = true;
+                        break;
+
+                    case FILL_NONRECURSIVE:
+                        currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
+                        fillingMode = true;
+                        break;
+                    case FILL_CANCEL:
+                        fillingMode = false;
+                        break;
+
+
                 }
-            } else {
-                if (!waitingForSecondClick) {
-                    startX = x;
-                    startY = y;
-                    waitingForSecondClick = true;
-                } else {
-                    if (drawingCircle) {
+            }
+                break;
+            static int circleClickStage = 0;
+            case WM_LBUTTONDOWN: {
+                int x = LOWORD(lp);
+                int y = HIWORD(lp);
+                if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
+                    if (circleClickStage == 0) {
+                        startX = x;
+                        startY = y;
+                        circleClickStage = 1;
+                    } else if (circleClickStage == 1) {
                         int dx = x - startX;
                         int dy = y - startY;
                         int radius = (int) round(sqrt(dx * dx + dy * dy));
                         shapes.push_back(
                                 {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
+                        circleClickStage = 2;
+                    } else if (circleClickStage == 2) {
+                        // Determine quarter from mouse click relative to center
+                        int quarter = 1;
+                        if (x >= startX && y <= startY) quarter = 1;
+                        else if (x <= startX && y <= startY) quarter = 2;
+                        else if (x <= startX && y >= startY) quarter = 3;
+                        else if (x >= startX && y >= startY) quarter = 4;
+                        // Update last shape
+                        shapes.back().quarter = quarter;
+                        circleClickStage = 0;
                         drawingCircle = false;
-                    } else {
-                        shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
+                        InvalidateRect(hwnd, NULL, TRUE);
                     }
-                    waitingForSecondClick = false;
-                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+                else if (fillingMode) {
+                    hdc = GetDC(hwnd);
+                    COLORREF borderColor = GetPixel(hdc, x, y);
+                    shapes.push_back({FILL,x, y,0, 0,RGB(0, 0, 0),LINE_DDA,CIRCLE_CARTESIAN,currentFillColor,borderColor,currentFillAlgo,0});                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+                else {
+                    if (!waitingForSecondClick) {
+                        startX = x;
+                        startY = y;
+                        waitingForSecondClick = true;
+                    } else {
+                        if (drawingCircle) {
+                            int dx = x - startX;
+                            int dy = y - startY;
+                            int radius = (int) round(sqrt(dx * dx + dy * dy));
+                            shapes.push_back(
+                                    {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
+                            drawingCircle = false;
+                        } else {
+                            shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
+                        }
+                        waitingForSecondClick = false;
+                        InvalidateRect(hwnd, NULL, TRUE);
+                    }
                 }
             }
-        }
             break;
 
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            hdc = BeginPaint(hwnd, &ps);
-            for (auto &shape: shapes) {
-                DrawShape(hdc, shape);
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                hdc = BeginPaint(hwnd, &ps);
+                for (auto &shape: shapes) {
+                    DrawShape(hdc, shape);
+                }
+                EndPaint(hwnd, &ps);
             }
-            EndPaint(hwnd, &ps);
+                break;
+            case WM_CLOSE:
+                DestroyWindow(hwnd);
+                break;
+            case WM_DESTROY:
+                PostQuitMessage(0);
+                break;
+            default:
+                return DefWindowProc(hwnd, msg, wp, lp);
         }
-            break;
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            break;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            break;
-        default:
-            return DefWindowProc(hwnd, msg, wp, lp);
+        return 0;
     }
-    return 0;
-}
+
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     WNDCLASS wc = {};                   //window class (window type)
     wc.cbClsExtra = 0;
