@@ -34,8 +34,6 @@ using namespace std;
 #define FILL_CANCEL   503
 
 
-
-
 enum ShapeType { LINE ,CIRCLE , FILL};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
 enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
@@ -131,41 +129,38 @@ void LineBersenham(HDC hdc , int x1 , int y1 , int x2 , int y2 , COLORREF c) {
     int dy = abs(y2 - y1);
     int x = x1;
     int y = y1;
-    int xinc = dx > 0 ? 1 : -1;
-    int yinc = dy > 0 ? 1 : -1;
+    int xinc = (x2 > x1) ? 1 : -1;
+    int yinc = (y2 > y1) ? 1 : -1;
     SetPixel(hdc, x, y, c);
     if (dx >= dy) {
         int d = 2 * dy - dx;
         int d1 = 2 * dy;
         int d2 = 2 * (dy - dx);
-        while (x < x2) {
+        while (x != x2) {
             if (d < 0) {
-                x += xinc;
                 d += d1;
             } else {
-                x += xinc;
                 y += yinc;
                 d += d2;
             }
+            x += xinc;
             SetPixel(hdc, x, y, c);
         }
     }
-    else{
+    else {
         int d = 2 * dx - dy;
         int d1 = 2 * dx;
         int d2 = 2 * (dx - dy);
-        while (y < y2) {
+        while (y != y2) {
             if (d < 0) {
-                y += yinc;
                 d += d1;
             } else {
                 x += xinc;
-                y += yinc;
                 d += d2;
             }
+            y += yinc;
             SetPixel(hdc, x, y, c);
         }
-
     }
 }
 
@@ -434,7 +429,7 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 DDAline(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
                 break;
             case LINE_MIDPOINT:
-                lineDrawing1(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
+                LineBersenham(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
                 break;
             case LINE_PARAMETRIC:
                 ParametricLine(hdc, shape.x1, shape.y1, shape.x2, shape.y2, 1000, shape.color);
