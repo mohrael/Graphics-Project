@@ -54,45 +54,7 @@ struct Shape {
 vector<Shape> shapes;
 bool waitingForSecondClick = false;
 
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-//line algorithms:
-//normal line drawing algorithm
-void lineDrawing1(HDC hdc , int x1 , int y1 , int x2 , int y2,COLORREF c){
-    int dx=abs(x2 - x1);
-    int dy=abs(y2 - y1);
-    double m=(double)dy/dx;
-    SetPixel(hdc , x1 , y1 , c);
-    if(dx >=dy){
-        if(x1>x2){
-            swap(x1 , x2);
-            swap(y1 , y2);
-        }
-        int x=x1;
-        double y;
-        while(x <x2){
-            x++;
-            y=((x-x1)*m)+y1;
-            SetPixel(hdc , x ,round(y),c);
-        }
-    }
-    else{
-        if(y1>y2){
-            swap(x1 , x2);
-            swap(y1 , y2);
-        }
-        int y=y1;
-        double x;
-        while(y <y2){
-            y++;
-            x=((y-y1)*(1/m))+x1;
-            SetPixel(hdc , round(x) ,y,c);
-        }
-    }
-}
-
+//line algorithms
 //drawing line DDA
 
 void DDAline(HDC hdc , int x1 , int y1 ,int x2, int y2 , COLORREF c){
