@@ -39,7 +39,7 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "GraphicsProject::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-GraphicsProject-Debug-bd32ea7c84df61d572c7.json",
+					"jsonFile" : "target-GraphicsProject-Debug-aae56f8951be83d253aa.json",
 					"name" : "GraphicsProject",
 					"projectIndex" : 0
 				}
@@ -49,12 +49,12 @@
 	"kind" : "codemodel",
 	"paths" : 
 	{
-		"build" : "C:/Users/dell/Desktop/Graphics-Project/cmake-build-debug",
-		"source" : "C:/Users/dell/Desktop/Graphics-Project"
+		"build" : "E:/FCAI/Third Year/Computer Graphics/Graphics-Project/cmake-build-debug",
+		"source" : "E:/FCAI/Third Year/Computer Graphics/Graphics-Project"
 	},
 	"version" : 
 	{
 		"major" : 2,
-		"minor" : 5
+		"minor" : 4
 	}
 }

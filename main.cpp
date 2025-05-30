@@ -27,31 +27,55 @@ using namespace std;
 #define ITERPOLAR_CIRCLE 303
 #define BRES_CIRCLE 304
 #define MODBRES_CIRCLE 305
+#define BEZIER_CURVE 306
+#define HERMITE_CURVE 307
+#define CARDINAL_SPLINE 308
+//#define FILL_CIRCLE_QUARTER 309
 #define SAVE 401
 #define LOAD 402
 #define FILL_RECURSIVE  501
 #define FILL_NONRECURSIVE  502
 #define FILL_CANCEL   503
+#define CONVEX 504
+#define NON_CONVEX 505
 
 
 
 
-enum ShapeType { LINE ,CIRCLE , FILL};
+enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
 enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
 enum FillAlgorithm { FLOOD_FILL_RECURSIVE, FLOOD_FILL_NONRECURSIVE };
+enum ConfexAlgorithm { CONVEX_FILL, NONCONVEX_FILL };
+enum CurveAlgorithm{BezierCurve, HermiteCurve,SplineCardinal };
 
+
+
+struct Point{
+    int x,y;
+    Point(int x=0,int y=0):x(x),y(y){};
+};
 
 struct Shape {
     ShapeType type;
     int x1, y1, x2, y2;
     COLORREF color;
-    LineAlgorithm linealgo;
+    LineAlgorithm lineAlgorithm;
     CircleAlgorithm circleAlgo;
     COLORREF fillColor;
     COLORREF currColor;
-    FillAlgorithm fillAlgo;
     int quarter = 1;
+    FillAlgorithm fillAlgo;
+
+    ConfexAlgorithm convexAlgo;
+    CurveAlgorithm currCurveAlgo;
+    int x3, y3, x4, y4;
+    vector<POINT> P;
+    vector<Point>point;
+    vector<Point> vertices;
+    int n;
+    double c;
+
 };
 vector<Shape> shapes;
 bool waitingForSecondClick = false;
@@ -288,12 +312,7 @@ void ModBresCircle(HDC hdc , int xc , int yc , int r , COLORREF c){
     }
 }
 //Filling Circle with lines after taking filling quarter from user
-
 typedef struct {int xleft,xright;}table[1000];
-struct Point{
-    int x,y;
-    Point(int x=0,int y=0):x(x),y(y){};
-};
 
 void DrawHorizontalLine(HDC hdc, int xLeft, int xRight, int y, COLORREF color) {
     for (int x = xLeft; x <= xRight; ++x) {
@@ -337,34 +356,26 @@ void tableToScreen(HDC hdc,table t,COLORREF c){
             DrawHorizontalLine(hdc,t[i].xleft,t[i].xright ,i ,c);
     }
 }
-
-void confex(HDC hdc , Point p[], int n,COLORREF c){
-    table t;
-    initTable(t);
-    polygonToTable(t,n,p);
-    tableToScreen(hdc,t,c);
-}
-
 void generateQuarterPolygon(HDC hdc,int xc, int yc, int R, int quarter, vector<Point> &polygon) {
     int x = 0, y = R;
     int d = 1 - R;
     while (x <= y) {
         switch (quarter) {
             case 1:
-                polygon.push_back({xc + x, yc - y});
-                polygon.push_back({xc + y, yc - x});
+                polygon.emplace_back(xc + x, yc - y);
+                polygon.emplace_back(xc + y, yc - x);
                 break;
             case 2:
-                polygon.push_back({xc - x, yc - y});
-                polygon.push_back({xc - y, yc - x});
+                polygon.emplace_back(xc - x, yc - y);
+                polygon.emplace_back(xc - y, yc - x);
                 break;
             case 3:
-                polygon.push_back({xc - x, yc + y});
-                polygon.push_back({xc - y, yc + x});
+                polygon.emplace_back(xc - x, yc + y);
+                polygon.emplace_back(xc - y, yc + x);
                 break;
             case 4:
-                polygon.push_back({xc + x, yc + y});
-                polygon.push_back({xc + y, yc + x});
+                polygon.emplace_back(xc + x, yc + y);
+                polygon.emplace_back(xc + y, yc + x);
                 break;
         }
         if (d < 0) d += 2 * x + 3;
@@ -376,9 +387,8 @@ void generateQuarterPolygon(HDC hdc,int xc, int yc, int R, int quarter, vector<P
     }
 
     // Connect arc to center to form triangle-like shape
-    polygon.push_back({xc, yc});
+    polygon.emplace_back(xc, yc);
 }
-
 
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -397,15 +407,12 @@ void FloodFill1(HDC hdc , int x ,int y , COLORREF currCol , COLORREF FillCol ) {
 }
 
 //2.non-Recursive flood fill
-struct point{
-    int x ; int y;
-    point(int x=0 , int y=0):x(x),y(y){}
-};
+
 void FloodFill2(HDC hdc , int x ,int y , COLORREF currCol , COLORREF FillCol ) {
-    stack<point> points;
-    points.push(point(x, y));
+    stack<Point> points;
+    points.push(Point(x, y));
     while (!points.empty()) {
-        point p = points.top();
+        Point p = points.top();
         points.pop();
 
         COLORREF c = GetPixel(hdc, p.x, p.y);
@@ -420,16 +427,261 @@ void FloodFill2(HDC hdc , int x ,int y , COLORREF currCol , COLORREF FillCol ) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////
+//Convex And non-Convex Algorithms
+// 1.Convex
 
+void polygonToTable(table t , int n ,const Point *p){
+    Point v1 = p[n-1];
+    for (int i = 0; i < n; ++i) {
+        Point v2=p[i];
+        edgeToTable(v1,v2,t);
+        v1=p[i];
+    }
+}
+
+void drawConvex(HDC hdc , const Point *p, int n, COLORREF c){
+    table t;
+    initTable(t);
+    polygonToTable(t,n,p);
+    tableToScreen(hdc,t,c);
+}
+
+//2. Non_Convex
+struct Edge{
+    double x;
+    int yMax;
+    double invSlope; //  ->1/m
+    Edge(double x, int yMax, double invSlope) : x(x), yMax(yMax), invSlope(invSlope) {}
+};
+vector<Edge>edgeTable[1000];
+vector<Edge>activeEdgeTable;
+
+void buildEdgeTable(Point polygon[],int n){
+    for (int i = 0; i < 1000; ++i) edgeTable[i].clear();
+    for (int i = 0; i < n; ++i) {
+        Point p1=polygon[i];
+        Point p2=polygon[(i+1)%n];
+        if (p1.y == p2.y) continue; // ignore horizontal
+
+        if (p1.y > p2.y) swap(p1, p2); // p1 is the lower one
+
+        double invSlope = (double)(p2.x - p1.x) / (p2.y - p1.y);
+        edgeTable[p1.y].emplace_back(p1.x, p2.y, invSlope);
+    }
+}
+
+void nonConvex(HDC hdc, Point polygon[], int n, COLORREF c){
+    buildEdgeTable(polygon ,n);
+    int y=0;
+    while (y < 1000 && edgeTable[y].empty()) y++; // find first non-empty scanline
+
+    activeEdgeTable.clear();
+    while(!activeEdgeTable.empty() || !edgeTable[y].empty()){
+        //step3: Append new edges to active
+        for(const Edge& e:edgeTable[y])
+            activeEdgeTable.push_back(e);
+
+        //step4: Remove edges where y=ymax
+        activeEdgeTable.erase(remove_if(activeEdgeTable.begin(),activeEdgeTable.end(),[y](Edge& e){
+            return e.yMax==y;}),activeEdgeTable.end());
+
+        //step5: sort active
+        sort(activeEdgeTable.begin(),activeEdgeTable.end(),[](Edge a,Edge b){
+            return a.x<b.x;
+        });
+
+        // Step 6: Draw spans between pairs of edges
+        for (size_t i = 0; i + 1 < activeEdgeTable.size(); i += 2) {
+            int xStart = (int)ceil(activeEdgeTable[i].x);
+            int xEnd = (int)floor(activeEdgeTable[i + 1].x);
+            DrawHorizontalLine(hdc, xStart, xEnd, y, c);
+        }
+
+        y++;
+
+        for(auto& edge:activeEdgeTable)
+            edge.x+=edge.invSlope;
+
+
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+//Hermite & Bezier Curve
+int Round(double x) {
+    return (int)(x + 0.5);
+}
+class Vector2
+{
+public:
+    double x, y;
+    Vector2(double _x=0, double _y=0): x(_x), y(_y) {}
+    Vector2(const Vector2& a){x=a.x;y=a.y;}
+
+};
+Vector2 operator-(Vector2& a,Vector2 &b)
+{
+    double m=a.x-b.x;
+    double n=a.y-b.y;
+    Vector2 c(m,n);
+    return c;
+}
+Vector2 operator*(double z,Vector2 a)
+{
+    double m=a.x*z;
+    double n=a.y*z;
+    Vector2 c(m,n);
+    return c;
+}
+class Vector4
+{
+public:
+    double x1;
+    double u1;
+    double x2;
+    double u2;
+    double v[4];
+    Vector4(double a=0,double b=0,double c=0,double d=0)
+    {
+        v[0]=x1=a;
+        v[1]=u1=b;
+        v[2]=x2=c;
+        v[3]=u2=d;
+    }
+    Vector4(const Vector4& v2)
+    {
+        memcpy(v,v2.v,4*sizeof(double));
+    }
+    double&operator[](int index)
+    {
+        return v[index];
+    }
+};
+class Matrix4
+{
+public:
+    double x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,x13,x14,x15;
+    double m[4][4];
+    Matrix4(double a0=0,double a1=0,double a2=0,double a3=0,double a4=0,double a5=0,double a6=0,double a7=0,double a8=0,double a9=0,double a10=0,double a11=0,double a12=0,double a13=0,double a14=0,double a15=0)
+    {
+        m[0][0]=x0=a0;
+        m[0][1]=x1=a1;
+        m[0][2]=x2=a2;
+        m[0][3]=x3=a3;
+        m[1][0]=x4=a4;
+        m[1][1]=x5=a5;
+        m[1][2]=x6=a6;
+        m[1][3]=x7=a7;
+        m[2][0]=x8=a8;
+        m[2][1]=x9=a9;
+        m[2][2]=x10=a10;
+        m[2][3]=x11=a11;
+        m[3][0]=x12=a12;
+        m[3][1]=x13=a13;
+        m[3][2]=x14=a14;
+        m[3][3]=x15=a15;
+    }
+    Matrix4(const Matrix4& m2)
+    {
+        memcpy(m,m2.m,16*sizeof(double));
+    }
+    double&operator()(int index1,int index2)
+    {
+        return m[index1][index2];
+    }
+};
+Vector4 operator*(Matrix4 m1,Vector4& v1)
+{
+    Vector4 res;
+    for(int i=0; i<4; i++)
+        for(int j=0; j<4; j++)
+            res[i]+=(v1[j]*m1(i,j));
+    return res;
+}
+double operator*(Vector4 &v1,Vector4& v2)
+{
+    return v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2]+v1[3]*v2[3];
+}
+
+void DrawHermiteCurve(HDC hdc,double x1,double y1,double u1,double u2,double x2,double y2,double v1,double v2,int n,COLORREF c)
+{
+    double dt=1.0/n;
+    Vector4 Gx(x1,u1,x2,u2);
+    Vector4 Gy(y1,v1,y2,v2);
+    Matrix4 m(1,0,0,0,0,1,0,0,-3,-2,3,-1,2,1,-2,1);
+    Vector4 Vx(m*Gx);
+    Vector4 Vy(m*Gy);
+    double x,y;
+    for(double t=0; t<1; t+=dt)
+    {
+        Vector4 Vt(1,t,t*t,t*t*t);
+        x=Vt*Vx;
+        y=Vt*Vy;
+        SetPixel(hdc,Round(x),Round(y),c);
+
+    }
+}
+void DrawHermiteCurve2(HDC hdc,Vector2& P1,Vector2& T1,Vector2& P2,Vector2& T2,int n,COLORREF c)
+{
+//    double dt=1.0/n;
+    Vector4 Gx(P1.x,T1.x,P2.x,T2.x);
+    Vector4 Gy(P1.y,T1.y,P2.y,T2.y);
+    Matrix4 m(1,0,0,0,0,1,0,0,-3,-2,3,-1,2,1,-2,1);
+    Vector4 Vx(m*Gx);
+    Vector4 Vy(m*Gy);
+    double x,y;
+    for(double t=0; t<=1; t+=0.001)
+    {
+        Vector4 Vt(1,t,t*t,t*t*t);
+        x=Vt*Vx;
+        y=Vt*Vy;
+        SetPixel(hdc,Round(x),Round(y),c);
+
+    }
+}
+
+
+void DrawBezierCubicCurve(HDC hdc,double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4,int n,COLORREF c)
+{
+    double u1=3*(x2-x1);
+    double v1=3*(y2-y1);
+    double u2=3*(x4-x3);
+    double v2=3*(y4-y3);
+    DrawHermiteCurve(hdc,x1,y1,u1,u2,x4,y4,v1,v2,n,c);
+}
+///////////////////////////////////////////////////////
+//17.Cardinal Spline Curve
+void cardinalSplineCurve(HDC hdc, vector<POINT> points, int n , double c, COLORREF color) {
+    std::vector<Vector2> p(n);
+    for (int i = 0; i < n; ++i) {
+        p[i] = Vector2(points[i].x, points[i].y);
+    }
+    Vector2 *T = new Vector2[n];
+    for (int i = 1; i < n - 2; ++i)
+        T[i] = c * (p[i + 1] - p[i - 1]);
+    T[0] = c * (p[1] - p[0]);
+    T[n - 1] = c * (p[n - 1] - p[n - 2]);
+    for (int i = 0; i < n - 2; ++i)
+        DrawHermiteCurve2(hdc, p[i], T[i], p[i + 1], T[i + 1], n, color);
+    delete[] T;
+}
+////////////////////////////////////////////////////////////////////////////////
+//Ellipse Algorithms [Direct, polar and midpoint]
+//1.Elipse Direct
+
+///////////////////////////////////////////////////////////////////////////////////////////
 int startX, startY;
 LineAlgorithm currentAlgo = LINE_DDA;
 CircleAlgorithm currentCircleAlgo = CIRCLE_CARTESIAN;
 FillAlgorithm currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
+ConfexAlgorithm currConvex= CONVEX_FILL;
+CurveAlgorithm currCurveAlgo = BezierCurve;
+static int circleClickStage = 0;
 
 COLORREF currentColor = RGB(0, 0, 0);
 void DrawShape(HDC hdc, const Shape& shape) {
     if (shape.type == LINE) {
-        switch (shape.linealgo) {
+        switch (shape.lineAlgorithm) {
             case LINE_DDA:
                 DDAline(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
                 break;
@@ -462,7 +714,7 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 vector<Point> polygon;
                 BresCircle(hdc, shape.x1, shape.y1, r, shape.color);  // optional: visualize the boundary
                 generateQuarterPolygon(hdc, shape.x1, shape.y1, r, shape.quarter, polygon);
-                confex(hdc, polygon.data(), polygon.size(), shape.color);
+                drawConvex(hdc, polygon.data(), polygon.size(), shape.color);
                 break;
 
         }
@@ -472,6 +724,42 @@ void DrawShape(HDC hdc, const Shape& shape) {
             FloodFill1(hdc, shape.x1, shape.y1, shape.currColor, shape.fillColor);
         } else if (shape.fillAlgo == FLOOD_FILL_NONRECURSIVE) {
             FloodFill2(hdc, shape.x1, shape.y1, shape.currColor, shape.fillColor);
+        }
+//        else if(shape.fillAlgo ==  Fill_Quarter) {
+//            circleClickStage=2;
+//            int dx = shape.x1 - startX;
+//            int dy = shape.y1 - startY;
+//            int r = (int) round(sqrt(dx * dx + dy * dy));
+//
+////                BresCircle(hdc, shape.x1, shape.y1, r, shape.color);
+////            DrawQuarterLine(hdc,shape.x1,shape.y1,shape.x2,shape.y2,shape.quarter,shape.color);
+////            BresCircleWithFillingLines(hdc, shape.x1, shape.y1,r , shape.color, shape.quarter);
+//        }
+    }
+
+    else if(shape.type == ConvexType){
+        Point* pts = new Point[shape.n];
+        for (int i = 0; i < shape.n; ++i) {
+            pts[i] = Point(shape.P[i].x, shape.P[i].y);
+        }
+
+        if(shape.convexAlgo == CONVEX_FILL){
+            drawConvex(hdc, shape.point.data(), shape.n, shape.fillColor);
+        }
+        else if(shape.convexAlgo == NONCONVEX_FILL){
+            nonConvex(hdc, pts, shape.n, shape.fillColor);
+        }
+        delete[] pts;
+
+    }
+    else if(shape.type == Curves){
+        if(shape.currCurveAlgo == SplineCardinal){
+            cardinalSplineCurve(hdc, shape.P, shape.n, shape.c, shape.color);
+//            DrawBezierCubicCurve(hdc,shape.x1,shape.y1,shape.x2,shape.y2,shape.x3,shape.y3,shape.x4,shape.y4,4,shape.color);
+
+        }
+        else if(shape.currCurveAlgo == HermiteCurve){
+//            DrawHermiteCurve(hdc,)
         }
     }
 }
@@ -535,10 +823,15 @@ void DrawShape(HDC hdc, const Shape& shape) {
     }
 
 
-    bool fillingMode = false;
-    bool drawingCircle = false;
-    COLORREF currentFillColor = RGB(255, 0, 0);
+bool fillingMode = false;
+bool drawingCircle = false;
+bool ConvexMode = false;
+bool drawingCurve=false;
+int idx=0,numPoints=6;
+Vector2 *P=new Vector2[numPoints];
+COLORREF currentFillColor = RGB(255, 0, 0);
     COLORREF currentBorderColor = RGB(0, 0, 0);
+
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC hdc;
         switch (msg) {
@@ -571,6 +864,17 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 HMENU FillAlgorithms = CreateMenu();
                 AppendMenu(FillAlgorithms, MF_STRING, FILL_RECURSIVE, "Recursive Flood Fill");
                 AppendMenu(FillAlgorithms, MF_STRING, FILL_NONRECURSIVE, "Non-Recursive Flood Fill");
+//                AppendMenu(FillAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
+
+                // Flood Fill
+                HMENU ConvexAlgorithms = CreateMenu();
+                AppendMenu(ConvexAlgorithms, MF_STRING, CONVEX, "Convex");
+                AppendMenu(ConvexAlgorithms, MF_STRING, NON_CONVEX, "Non-Convex");
+
+                HMENU CurveAlgorithms = CreateMenu();
+                AppendMenu(CurveAlgorithms, MF_STRING, BEZIER_CURVE, "Bezier Curve");
+                AppendMenu(CurveAlgorithms, MF_STRING, HERMITE_CURVE, "Hermite Curve");
+                AppendMenu(CurveAlgorithms, MF_STRING, CARDINAL_SPLINE, "Cardinal Spline");
 
 
                 //main menu
@@ -578,7 +882,11 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) LineAlgorithms, "Line Algorithm");
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)FillAlgorithms, "Flood Fill");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)ConvexAlgorithms, "Convex Algorithm");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)CurveAlgorithms, "Curve Algorithm");
+
                 AppendMenu(FillAlgorithms, MF_STRING, FILL_CANCEL, "Cancel Fill Mode");
+
 
 
 
@@ -664,18 +972,45 @@ void DrawShape(HDC hdc, const Shape& shape) {
                         currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
                         fillingMode = true;
                         break;
+                    case BEZIER_CURVE:
+                        drawingCurve=true;
+                        currCurveAlgo = BezierCurve;
+                        break;
+                    case HERMITE_CURVE:
+                        drawingCurve=true;
+                        currCurveAlgo = HermiteCurve;
+                        break;
+                    case CARDINAL_SPLINE:
+                        drawingCurve=true;
+                        currCurveAlgo = SplineCardinal;
+                        break;
+                    case CONVEX:
+                        ConvexMode=true;
+                        currConvex=CONVEX_FILL;
+                        break;
+                    case NON_CONVEX:
+                        ConvexMode=true;
+                        currConvex=NONCONVEX_FILL;
+                        break;
+
+
                     case FILL_CANCEL:
                         fillingMode = false;
+                        ConvexMode=false;
                         break;
 
 
                 }
             }
                 break;
-            static int circleClickStage = 0;
+                static Point polygon[5];
+                static int count = 0;
+                static int circleClickStage = 0;
             case WM_LBUTTONDOWN: {
                 int x = LOWORD(lp);
                 int y = HIWORD(lp);
+
+
                 if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
                     if (circleClickStage == 0) {
                         startX = x;
@@ -705,7 +1040,55 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 else if (fillingMode) {
                     hdc = GetDC(hwnd);
                     COLORREF borderColor = GetPixel(hdc, x, y);
-                    shapes.push_back({FILL,x, y,0, 0,RGB(0, 0, 0),LINE_DDA,CIRCLE_CARTESIAN,currentFillColor,borderColor,currentFillAlgo,0});                    InvalidateRect(hwnd, NULL, TRUE);
+                    shapes.push_back(
+                            {FILL, x, y, 0, 0, RGB(0, 0, 0), LINE_DDA, CIRCLE_CARTESIAN, currentFillColor, borderColor,
+                             1, currentFillAlgo});
+                }
+                else if (ConvexMode){
+                    polygon[count].x = LOWORD(lp);
+                    polygon[count].y = HIWORD(lp);
+                    if (count ==4)
+                    {
+                        hdc = GetDC(hwnd);
+                        drawConvex(hdc, polygon, 5, currentColor);
+                        ReleaseDC(hwnd, hdc);
+                        count = 0;
+                    }
+                    else {
+                        count++;
+                    }
+                 }
+                else if(drawingCurve){
+                    if(idx<numPoints)
+                    {
+                        P[idx].x=LOWORD(lp);
+                        P[idx].y=HIWORD(lp);
+                        idx++;
+                    }
+                    else {
+                        idx=0;
+                        hdc = GetDC(hwnd);
+                        std::vector<POINT> pointVec;
+                        for (int i = 0; i < numPoints; ++i) {
+                            POINT pt;
+                            pt.x = static_cast<LONG>(P[i].x);
+                            pt.y = static_cast<LONG>(P[i].y);
+                            pointVec.push_back(pt);
+                        }
+                        Shape s;
+                        s.type = Curves;
+                        s.currCurveAlgo = SplineCardinal;
+                        s.P = pointVec;
+                        s.n = numPoints;
+
+                        s.c = 1.0; // or any tension value you want
+                        s.color = currentColor;
+                        shapes.push_back(s);
+                        ReleaseDC(hwnd, hdc);
+                        InvalidateRect(hwnd, NULL, TRUE);
+                        drawingCurve= false;
+                    }
+
                 }
                 else {
                     if (!waitingForSecondClick) {
