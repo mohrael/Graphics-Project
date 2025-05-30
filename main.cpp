@@ -80,45 +80,7 @@ struct Shape {
 vector<Shape> shapes;
 bool waitingForSecondClick = false;
 
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-//line algorithms:
-//normal line drawing algorithm
-void lineDrawing1(HDC hdc , int x1 , int y1 , int x2 , int y2,COLORREF c){
-    int dx=abs(x2 - x1);
-    int dy=abs(y2 - y1);
-    double m=(double)dy/dx;
-    SetPixel(hdc , x1 , y1 , c);
-    if(dx >=dy){
-        if(x1>x2){
-            swap(x1 , x2);
-            swap(y1 , y2);
-        }
-        int x=x1;
-        double y;
-        while(x <x2){
-            x++;
-            y=((x-x1)*m)+y1;
-            SetPixel(hdc , x ,round(y),c);
-        }
-    }
-    else{
-        if(y1>y2){
-            swap(x1 , x2);
-            swap(y1 , y2);
-        }
-        int y=y1;
-        double x;
-        while(y <y2){
-            y++;
-            x=((y-y1)*(1/m))+x1;
-            SetPixel(hdc , round(x) ,y,c);
-        }
-    }
-}
-
+//line algorithms
 //drawing line DDA
 
 void DDAline(HDC hdc , int x1 , int y1 ,int x2, int y2 , COLORREF c){
@@ -155,41 +117,38 @@ void LineBersenham(HDC hdc , int x1 , int y1 , int x2 , int y2 , COLORREF c) {
     int dy = abs(y2 - y1);
     int x = x1;
     int y = y1;
-    int xinc = dx > 0 ? 1 : -1;
-    int yinc = dy > 0 ? 1 : -1;
+    int xinc = (x2 > x1) ? 1 : -1;
+    int yinc = (y2 > y1) ? 1 : -1;
     SetPixel(hdc, x, y, c);
     if (dx >= dy) {
         int d = 2 * dy - dx;
         int d1 = 2 * dy;
         int d2 = 2 * (dy - dx);
-        while (x < x2) {
+        while (x != x2) {
             if (d < 0) {
-                x += xinc;
                 d += d1;
             } else {
-                x += xinc;
                 y += yinc;
                 d += d2;
             }
+            x += xinc;
             SetPixel(hdc, x, y, c);
         }
     }
-    else{
+    else {
         int d = 2 * dx - dy;
         int d1 = 2 * dx;
         int d2 = 2 * (dx - dy);
-        while (y < y2) {
+        while (y != y2) {
             if (d < 0) {
-                y += yinc;
                 d += d1;
             } else {
                 x += xinc;
-                y += yinc;
                 d += d2;
             }
+            y += yinc;
             SetPixel(hdc, x, y, c);
         }
-
     }
 }
 
@@ -686,7 +645,7 @@ void DrawShape(HDC hdc, const Shape& shape) {
                 DDAline(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
                 break;
             case LINE_MIDPOINT:
-                lineDrawing1(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
+                LineBersenham(hdc, shape.x1, shape.y1, shape.x2, shape.y2, shape.color);
                 break;
             case LINE_PARAMETRIC:
                 ParametricLine(hdc, shape.x1, shape.y1, shape.x2, shape.y2, 1000, shape.color);
