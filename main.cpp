@@ -38,17 +38,19 @@ using namespace std;
 #define FILL_CANCEL   503
 #define CONVEX 504
 #define NON_CONVEX 505
+#define ELLIPSE_POLAR 506
+#define ELLIPSE_DIRECT 508
+#define ELLIPSE_MID 507
 
 
 
-
-enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves};
+enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves, Ellipsee};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
+enum EllipseAlgorithm{Ellipse_Polar,Ellipse_Direct,Ellipse_MID};
 enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
 enum FillAlgorithm { FLOOD_FILL_RECURSIVE, FLOOD_FILL_NONRECURSIVE };
-enum ConfexAlgorithm { CONVEX_FILL, NONCONVEX_FILL };
+enum ConvexAlgorithm { CONVEX_FILL, NONCONVEX_FILL };
 enum CurveAlgorithm{BezierCurve, HermiteCurve,SplineCardinal };
-
 
 
 struct Point{
@@ -66,15 +68,15 @@ struct Shape {
     COLORREF currColor;
     int quarter = 1;
     FillAlgorithm fillAlgo;
-
-    ConfexAlgorithm convexAlgo;
+    ConvexAlgorithm convexAlgo;
     CurveAlgorithm currCurveAlgo;
-    int x3, y3, x4, y4;
+    int rx,ry;
     vector<POINT> P;
     vector<Point>point;
     vector<Point> vertices;
     int n;
     double c;
+    EllipseAlgorithm currEllipseAlgo;
 
 };
 vector<Shape> shapes;
@@ -626,18 +628,109 @@ void cardinalSplineCurve(HDC hdc, vector<POINT> points, int n , double c, COLORR
 }
 ////////////////////////////////////////////////////////////////////////////////
 //Ellipse Algorithms [Direct, polar and midpoint]
-//1.Elipse Direct
+//1.Ellipse Direct
+int Max(int x,int y)
+{
+    if(x>y)
+        return x;
+    return y;
+}
+void Draw8EllipsePoints(HDC hdc, int xc, int yc, int x, int y, COLORREF color) {
+    SetPixel(hdc, xc + x, yc + y, color);
+    SetPixel(hdc, xc - x, yc + y, color);
+    SetPixel(hdc, xc + x, yc - y, color);
+    SetPixel(hdc, xc - x, yc - y, color);
+}
+//direct
+void DrawEllipse_Direct(HDC hdc, int xc, int yc, int rx, int ry, COLORREF c) {
+    int x = 0;
+    int steps = (int)(rx / sqrt(1 + (double)(ry * ry) / (rx * rx)));
+    while (x <= steps) {
+        double y = ry * sqrt(1.0 - (double)(x * x) / (rx * rx));
+        Draw8EllipsePoints(hdc, xc, yc, x, round(y), c);
+        x++;
+    }
+
+    int y = 0;
+    steps = (int)(ry / sqrt(1 + (double)(rx * rx) / (ry * ry)));
+    while (y <= steps) {
+        double xVal = rx * sqrt(1.0 - (double)(y * y) / (ry * ry));
+        Draw8EllipsePoints(hdc, xc, yc, round(xVal), y, c);
+        y++;
+    }
+}
+//Polar
+void DrawEllipse_Polar(HDC hdc,int xc,int yc,int A,int B,COLORREF c)
+{
+    double dtheta=1.0/Max(A,B);
+    for(double theta=0; theta<6.28; theta+=dtheta)
+    {
+        double x=xc+A*cos(theta);
+        double y=yc+B*sin(theta);
+        SetPixel(hdc,Round(x),Round(y),c);
+    }
+}
+
+//Midpoint
+void DrawEllipse_Midpoint(HDC hdc, int xc, int yc, int rx, int ry, COLORREF color) {
+    int x = 0, y = ry;
+    int rx2 = rx * rx;
+    int ry2 = ry * ry;
+    int two_rx2 = 2 * rx2;
+    int two_ry2 = 2 * ry2;
+
+    int px = 0;
+    int py = two_rx2 * y;
+
+    // Region 1
+    int p = round(ry2 - (rx2 * ry) + (0.25 * rx2));
+    while (px < py) {
+        Draw8EllipsePoints(hdc, xc, yc, x, y, color);
+        x++;
+        px += two_ry2;
+        if (p < 0) {
+            p += ry2 + px;
+        } else {
+            y--;
+            py -= two_rx2;
+            p += ry2 + px - py;
+        }
+    }
+
+    // Region 2
+    p = round(ry2 * (x + 0.5) * (x + 0.5) +
+              rx2 * (y - 1) * (y - 1) -
+              rx2 * ry2);
+
+    while (y >= 0) {
+        Draw8EllipsePoints(hdc, xc, yc, x, y, color);
+        y--;
+        py -= two_rx2;
+        if (p > 0) {
+            p += rx2 - py;
+        } else {
+            x++;
+            px += two_ry2;
+            p += rx2 - py + px;
+        }
+    }
+}
+
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 int startX, startY;
 LineAlgorithm currentAlgo = LINE_DDA;
 CircleAlgorithm currentCircleAlgo = CIRCLE_CARTESIAN;
 FillAlgorithm currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
-ConfexAlgorithm currConvex= CONVEX_FILL;
+ConvexAlgorithm currConvex= CONVEX_FILL;
 CurveAlgorithm currCurveAlgo = BezierCurve;
 static int circleClickStage = 0;
-
+EllipseAlgorithm currEllipse=Ellipse_MID;
 COLORREF currentColor = RGB(0, 0, 0);
+Point ellipseCenter;
+bool waitingForndClick = false;
+
 void DrawShape(HDC hdc, const Shape& shape) {
     if (shape.type == LINE) {
         switch (shape.lineAlgorithm) {
@@ -650,6 +743,17 @@ void DrawShape(HDC hdc, const Shape& shape) {
             case LINE_PARAMETRIC:
                 ParametricLine(hdc, shape.x1, shape.y1, shape.x2, shape.y2, 1000, shape.color);
                 break;
+        }
+    } else if(shape.type == Ellipsee){
+        switch (shape.currEllipseAlgo) {
+            case Ellipse_Direct:
+                DrawEllipse_Direct(hdc, shape.x1, shape.y1, shape.rx, shape.ry, shape.color);
+                break;
+            case Ellipse_Polar:
+                DrawEllipse_Polar(hdc, shape.x1, shape.y1, shape.rx, shape.ry, shape.color);
+                break;
+            case Ellipse_MID:
+                DrawEllipse_Midpoint(hdc, shape.x1, shape.y1, shape.rx, shape.ry, shape.color);
         }
     } else if (shape.type == CIRCLE) {
         int r = shape.x2; // We stored radius in x2
@@ -711,6 +815,7 @@ void DrawShape(HDC hdc, const Shape& shape) {
         delete[] pts;
 
     }
+
     else if(shape.type == Curves){
         if(shape.currCurveAlgo == SplineCardinal){
             cardinalSplineCurve(hdc, shape.P, shape.n, shape.c, shape.color);
@@ -781,17 +886,19 @@ void DrawShape(HDC hdc, const Shape& shape) {
         }
     }
 
-
+bool drawingEllipse=false;
 bool fillingMode = false;
 bool drawingCircle = false;
 bool ConvexMode = false;
 bool drawingCurve=false;
 int idx=0,numPoints=6;
+
+
 Vector2 *P=new Vector2[numPoints];
 COLORREF currentFillColor = RGB(255, 0, 0);
-    COLORREF currentBorderColor = RGB(0, 0, 0);
+COLORREF currentBorderColor = RGB(0, 0, 0);
 
-    LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC hdc;
         switch (msg) {
             case WM_CREATE: {                                      //menu
@@ -825,16 +932,21 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                 AppendMenu(FillAlgorithms, MF_STRING, FILL_NONRECURSIVE, "Non-Recursive Flood Fill");
 //                AppendMenu(FillAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
 
-                // Flood Fill
+                //Convex
                 HMENU ConvexAlgorithms = CreateMenu();
                 AppendMenu(ConvexAlgorithms, MF_STRING, CONVEX, "Convex");
                 AppendMenu(ConvexAlgorithms, MF_STRING, NON_CONVEX, "Non-Convex");
+
+                //ELLIPSE
+                HMENU EllipseAlgorithms = CreateMenu();
+                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_DIRECT , "Direct Ellipse");
+                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_POLAR, "Polar Ellipse");
+                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_MID, "Midpoint Ellipse");
 
                 HMENU CurveAlgorithms = CreateMenu();
                 AppendMenu(CurveAlgorithms, MF_STRING, BEZIER_CURVE, "Bezier Curve");
                 AppendMenu(CurveAlgorithms, MF_STRING, HERMITE_CURVE, "Hermite Curve");
                 AppendMenu(CurveAlgorithms, MF_STRING, CARDINAL_SPLINE, "Cardinal Spline");
-
 
                 //main menu
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) Colors, "Color");
@@ -842,12 +954,10 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)FillAlgorithms, "Flood Fill");
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)ConvexAlgorithms, "Convex Algorithm");
+                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)EllipseAlgorithms, "Ellipse Algorithm");
                 AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)CurveAlgorithms, "Curve Algorithm");
 
                 AppendMenu(FillAlgorithms, MF_STRING, FILL_CANCEL, "Cancel Fill Mode");
-
-
-
 
                 AppendMenu(MainMenu, MF_STRING, 401, "Save");
                 AppendMenu(MainMenu, MF_STRING, 402, "Load");
@@ -926,7 +1036,6 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                         currentFillAlgo = FLOOD_FILL_RECURSIVE;
                         fillingMode = true;
                         break;
-
                     case FILL_NONRECURSIVE:
                         currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
                         fillingMode = true;
@@ -951,14 +1060,22 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                         ConvexMode=true;
                         currConvex=NONCONVEX_FILL;
                         break;
-
-
+                    case ELLIPSE_MID:
+                        drawingEllipse= true;
+                        currEllipse=Ellipse_MID;
+                        break;
+                    case ELLIPSE_POLAR:
+                        drawingEllipse= true;
+                        currEllipse=Ellipse_Polar;
+                        break;
+                    case ELLIPSE_DIRECT:
+                        drawingEllipse= true;
+                        currEllipse=Ellipse_Direct;
+                        break;
                     case FILL_CANCEL:
                         fillingMode = false;
                         ConvexMode=false;
                         break;
-
-
                 }
             }
                 break;
@@ -1016,7 +1133,30 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                     else {
                         count++;
                     }
-                 }
+                }
+//                else if(currEllipse){
+//                    if (!waitingForndClick) {
+//                        startX = LOWORD(lp);
+//                        startY = HIWORD(lp);
+//                        waitingForndClick = true;
+//                    } else {
+//                        int rx = abs(startX - x);
+//                        int ry = abs(startY-y);
+//
+//                        Shape ellipseShape;
+//                        ellipseShape.type = Ellipsee;
+//                        ellipseShape.x1 = startX;
+//                        ellipseShape.y1 = startY;
+//                        ellipseShape.rx = rx;
+//                        ellipseShape.ry = ry;
+//                        ellipseShape.color = currentColor;
+//                        ellipseShape.currEllipseAlgo = currEllipse;
+//                        shapes.push_back(ellipseShape);
+//                        drawingEllipse = false;
+//                    }
+//                    waitingForSecondClick = false;
+//                    InvalidateRect(hwnd, NULL, TRUE);
+//                }
                 else if(drawingCurve){
                     if(idx<numPoints)
                     {
@@ -1062,12 +1202,30 @@ COLORREF currentFillColor = RGB(255, 0, 0);
                             shapes.push_back(
                                     {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
                             drawingCircle = false;
-                        } else {
+                        }
+                        else if(drawingEllipse){
+                            int rx = abs(x - startX);
+                            int ry = abs(y - startY);
+
+                            Shape ellipseShape;
+                            ellipseShape.type = Ellipsee;
+                            ellipseShape.x1 = startX;
+                            ellipseShape.y1 = startY;
+                            ellipseShape.rx = rx;
+                            ellipseShape.ry = ry;
+                            ellipseShape.color = currentColor;  // or ellipseShape.currColor
+                            ellipseShape.currEllipseAlgo = currEllipse;
+                            shapes.push_back(ellipseShape);
+                            drawingEllipse = false;
+
+                        }
+                        else {
                             shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
                         }
                         waitingForSecondClick = false;
                         InvalidateRect(hwnd, NULL, TRUE);
                     }
+
                 }
             }
             break;
