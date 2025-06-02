@@ -44,14 +44,14 @@ using namespace std;
 #define ELLIPSE_MID 507
 #define LINE_POINT_CLIPPING 600
 #define POLYGON_LINE_POINT_CLIPPING 601
-
+#define CIRCLE_WITH_CIRCLES 602
 
 
 
 enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves, Ellipsee,Clip};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
 enum EllipseAlgorithm{Ellipse_Polar,Ellipse_Direct,Ellipse_MID};
-enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
+enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER, FILL_CIRCLE_WITH_CIRCLES};
 enum FillAlgorithm { FLOOD_FILL_RECURSIVE, FLOOD_FILL_NONRECURSIVE };
 enum ConvexAlgorithm { CONVEX_FILL, NONCONVEX_FILL };
 enum CurveAlgorithm{BezierCurve, HermiteCurve,SplineCardinal };
@@ -293,6 +293,52 @@ void ModBresCircle(HDC hdc , int xc , int yc , int r , COLORREF c){
         }
     }
 }
+void FillCircleQuarterWithCircles(HDC hdc, int xc, int yc, int R, int quarter, COLORREF color) {
+    int fillRadius = 2;
+
+    // Create a more dense pattern
+    for (int r = fillRadius; r < R - fillRadius; r += fillRadius * 2) {
+        // Calculate number of circles for this radius
+        int circumference = (int)(2 * 3.14159 * r / 4); // Quarter circle
+        int numCircles = circumference / (fillRadius * 2);
+        if (numCircles < 1) numCircles = 1;
+
+        for (int i = 0; i <= numCircles; i++) {
+            double angle = (3.14159 / 2) * i / numCircles; // 0 to π/2 for quarter
+            int x = (int)(r * cos(angle));
+            int y = (int)(r * sin(angle));
+
+            int drawX, drawY;
+
+            switch (quarter) {
+                case 1: // First quarter (top-right)
+                    drawX = xc + x;
+                    drawY = yc - y;
+                    break;
+                case 2: // Second quarter (top-left)
+                    drawX = xc - x;
+                    drawY = yc - y;
+                    break;
+                case 3: // Third quarter (bottom-left)
+                    drawX = xc - x;
+                    drawY = yc + y;
+                    break;
+                case 4: // Fourth quarter (bottom-right)
+                    drawX = xc + x;
+                    drawY = yc + y;
+                    break;
+                default:
+                    drawX = xc + x;
+                    drawY = yc - y;
+                    break;
+            }
+
+            // Draw small circle
+            BresCircle(hdc, drawX, drawY, fillRadius, color);
+        }
+    }
+}
+
 //Filling Circle with lines after taking filling quarter from user
 typedef struct {int xleft,xright;}table[1000];
 
@@ -1079,6 +1125,10 @@ void DrawShape(HDC hdc, const Shape& shape) {
             case CIRCLE_MODBRES:
                 ModBresCircle(hdc, shape.x1, shape.y1, r, shape.color);
                 break;
+            case FILL_CIRCLE_WITH_CIRCLES:
+                BresCircle(hdc, shape.x1, shape.y1, r, shape.color);  // optional: visualize the boundary
+                FillCircleQuarterWithCircles(hdc,shape.x1, shape.y1, r,shape.quarter, shape.color);
+                break;
             case FILL_CIRCLE_QUARTER:
                 vector<Point> polygon;
                 BresCircle(hdc, shape.x1, shape.y1, r, shape.color);  // optional: visualize the boundary
@@ -1244,6 +1294,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             AppendMenu(CircleAlgorithms, MF_STRING, BRES_CIRCLE, "Bresenham Circle");
             AppendMenu(CircleAlgorithms, MF_STRING, MODBRES_CIRCLE, "Modified Bresenham Circle");
             AppendMenu(CircleAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, CIRCLE_WITH_CIRCLES, "Fill Circle With Circles");
 
             // Flood Fill
             HMENU FillAlgorithms = CreateMenu();
@@ -1376,6 +1427,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     drawingCircle = true;
                     currentCircleAlgo = FILL_CIRCLE_QUARTER;
                     break;
+                case CIRCLE_WITH_CIRCLES:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = FILL_CIRCLE_WITH_CIRCLES;
+                    break;
                 case FILL_RECURSIVE:
                     clip1=false;
                     clip2=false;
@@ -1472,7 +1529,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int y = HIWORD(lp);
 
 
-            if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
+            if (drawingCircle && (currentCircleAlgo == FILL_CIRCLE_QUARTER || currentCircleAlgo== FILL_CIRCLE_WITH_CIRCLES)) {
                 if (circleClickStage == 0) {
                     startX = x;
                     startY = y;

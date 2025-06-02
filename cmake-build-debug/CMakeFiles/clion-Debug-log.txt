@@ -1,16 +1,333 @@
-"E:\New folder\CLion 2022.3.3\bin\cmake\win\x64\bin\cmake.exe" -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=E:/New folder/CLion 2022.3.3/bin/ninja/win/x64/ninja.exe" -G Ninja -S "E:\FCAI\Third Year\Computer Graphics\Graphics-Project" -B "E:\FCAI\Third Year\Computer Graphics\Graphics-Project\cmake-build-debug"
--- The C compiler identification is GNU 11.2.0
--- The CXX compiler identification is GNU 11.2.0
--- Detecting C compiler ABI info
--- Detecting C compiler ABI info - done
--- Check for working C compiler: E:/New folder/CLion 2022.3.3/bin/mingw/bin/gcc.exe - skipped
--- Detecting C compile features
--- Detecting C compile features - done
--- Detecting CXX compiler ABI info
--- Detecting CXX compiler ABI info - done
--- Check for working CXX compiler: E:/New folder/CLion 2022.3.3/bin/mingw/bin/g++.exe - skipped
--- Detecting CXX compile features
--- Detecting CXX compile features - done
--- Configuring done (146.8s)
--- Generating done (0.0s)
--- Build files have been written to: C:/Users/dell/Desktop/Graphics-Project/cmake-build-debug
+#define UNICODE
+#define _UNICODE
+
+#include <Windows.h>
+#include <vector>
+#include <map>
+#include <cmath>
+#include <algorithm>
+
+using namespace std;
+
+int Round(double x)
+{
+    return (int)(x + 0.5);
+}
+
+// Structure to represent a 2D point.
+struct Point
+{
+    double x, y;
+};
+
+// Structure to represent an edge node for the scan-line algorithm.
+struct Node
+{
+    double x;  // X-coordinate of the intersection with the current scan line.
+    double mi; // Inverse slope (dx/dy) of the edge.
+    int y;     // Maximum y-coordinate of the edge (upper endpoint).
+
+    // Custom comparison operator for sorting Nodes by x-coordinate.
+    bool operator<(const Node &other) const
+    {
+        return x < other.x;
+    }
+};
+
+// Adds an edge to the edge table for the scan-line fill algorithm.
+// The edge table is a map where keys are y-coordinates and values are vectors of Nodes.
+void edgeToTable(map<int, vector<Node>> &edgeTable, Point v1, Point v2)
+{
+    // Ignore horizontal edges.
+    if (v1.y == v2.y)
+        return;
+
+    // Ensure v1 is the lower endpoint (smaller y-coordinate).
+    if (v1.y > v2.y)
+        swap(v1, v2);
+
+    // If the entry for v1.y doesn't exist, create a new vector.
+    if (edgeTable.find(v1.y) == edgeTable.end())
+        edgeTable[v1.y] = vector<Node>();
+
+    // Add the edge node to the edge table.
+    edgeTable[v1.y].push_back({v1.x, (v2.x - v1.x) / (v2.y - v1.y), Round(v2.y)});
+}
+
+// Fills a polygon using the scan-line algorithm.
+void GeneralFill(HDC hdc, vector<Point> points, COLORREF fillColor)
+{
+    map<int, vector<Node>> edgeTable;
+    Point v1 = points.back(); // Start with the last point to form the first edge.
+
+    // Populate the edge table with all polygon edges.
+    for (const auto &v2 : points)
+    {
+        edgeToTable(edgeTable, v1, v2);
+        v1 = v2; // Move to the next point.
+    }
+
+    // Get the starting scan line (minimum y-coordinate in the edge table).
+    int y = edgeTable.begin()->first;
+    // Initialize the active edge list with edges starting at this y-coordinate.
+    vector<Node> active = edgeTable.begin()->second;
+
+    // Process scan lines until there are no active edges left.
+    while (!active.empty())
+    {
+        // Sort active edges by x-coordinate.
+        sort(active.begin(), active.end());
+
+        // Fill pixels between pairs of x-coordinates.
+        for (size_t i = 0; i < active.size() - 1; i += 2)
+        {
+            int x1 = Round(active[i].x);
+            int x2 = Round(active[i + 1].x);
+            for (int x = x1; x <= x2; ++x)
+            {
+                SetPixel(hdc, x, y, fillColor);
+            }
+        }
+
+        // Increment y to the next scan line.
+        ++y;
+
+        // Remove edges that end at or before the current scan line.
+        active.erase(remove_if(active.begin(), active.end(), [y](const Node &node)
+                     { return node.y <= y; }),
+                     active.end());
+
+        // Update x-coordinates of remaining active edges.
+        for (size_t i = 0; i < active.size(); ++i)
+        {
+            active[i].x += active[i].mi;
+        }
+
+        // Add new edges from the edge table that start at the current scan line.
+        if (edgeTable.find(y) != edgeTable.end())
+        {
+            active.insert(active.end(), edgeTable[y].begin(), edgeTable[y].end());
+        }
+    }
+}
+
+// Calculates the intersection point of a line segment (p1, p2) with a vertical line x.
+Point vIntersection(Point p1, Point p2, double x)
+{
+    Point result;
+    result.x = x;
+    if (p1.x == p2.x) // Vertical line segment
+        result.y = p1.y;
+    else
+        result.y = p1.y + (p2.y - p1.y) * (x - p1.x) / (p2.x - p1.x);
+    return result;
+}
+
+// Calculates the intersection point of a line segment (p1, p2) with a horizontal line y.
+Point hIntersection(Point p1, Point p2, double y)
+{
+    Point result;
+    result.y = y;
+    if (p1.y == p2.y) // Horizontal line segment
+        result.x = p1.x;
+    else
+        result.x = p1.x + (p2.x - p1.x) * (y - p1.y) / (p2.y - p1.y);
+    return result;
+}
+
+// Performs Sutherland-Hodgman polygon clipping against a rectangular window.
+void PolygonClipping(HDC hdc, vector<Point> points, int left, int top, int right, int bottom)
+{
+    // Draw the original polygon in black.
+    GeneralFill(hdc, points, RGB(0, 0, 0));
+
+    vector<Point> result;
+    Point p1;
+
+    // Clip against the left edge of the clipping window.
+    p1 = points.back();
+    for (const auto &p2 : points)
+    {
+        if (p1.x >= left && p2.x >= left) // Both inside or on the edge
+        {
+            result.push_back(p2);
+        }
+        else if (p2.x >= left) // p1 outside, p2 inside
+        {
+            result.push_back(vIntersection(p1, p2, left));
+            result.push_back(p2);
+        }
+        else if (p1.x >= left) // p1 inside, p2 outside
+        {
+            result.push_back(vIntersection(p1, p2, left));
+        }
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Clip against the right edge of the clipping window.
+    p1 = points.back();
+    for (const auto &p2 : points)
+    {
+        if (p1.x <= right && p2.x <= right) // Both inside or on the edge
+        {
+            result.push_back(p2);
+        }
+        else if (p2.x <= right) // p1 outside, p2 inside
+        {
+            result.push_back(vIntersection(p1, p2, right));
+            result.push_back(p2);
+        }
+        else if (p1.x <= right) // p1 inside, p2 outside
+        {
+            result.push_back(vIntersection(p1, p2, right));
+        }
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Clip against the top edge of the clipping window.
+    p1 = points.back();
+    for (const auto &p2 : points)
+    {
+        if (p1.y >= top && p2.y >= top) // Both inside or on the edge
+        {
+            result.push_back(p2);
+        }
+        else if (p2.y >= top) // p1 outside, p2 inside
+        {
+            result.push_back(hIntersection(p1, p2, top));
+            result.push_back(p2);
+        }
+        else if (p1.y >= top) // p1 inside, p2 outside
+        {
+            result.push_back(hIntersection(p1, p2, top));
+        }
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Clip against the bottom edge of the clipping window.
+    p1 = points.back();
+    for (const auto &p2 : points)
+    {
+        if (p1.y <= bottom && p2.y <= bottom) // Both inside or on the edge
+        {
+            result.push_back(p2);
+        }
+        else if (p2.y <= bottom) // p1 outside, p2 inside
+        {
+            result.push_back(hIntersection(p1, p2, bottom));
+            result.push_back(p2);
+        }
+        else if (p1.y <= bottom) // p1 inside, p2 outside
+        {
+            result.push_back(hIntersection(p1, p2, bottom));
+        }
+        p1 = p2;
+    }
+
+    // Fill the clipped polygon in red.
+    GeneralFill(hdc, result, RGB(255, 0, 0));
+}
+
+// Window procedure function to handle Windows messages.
+LRESULT CALLBACK WndProc(HWND hwnd, UINT m, WPARAM wp, LPARAM lp)
+{
+    HDC hdc;
+    static int left, top, right, bottom; // Static variables to store clipping window coordinates.
+    static vector<Point> points;         // Static vector to store polygon points.
+
+    switch (m)
+    {
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            hdc = BeginPaint(hwnd, &ps);
+
+            RECT rect;
+            // Get the size of the client area.
+            GetClientRect(hwnd, &rect);
+
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+
+            // Calculate center and square size for the clipping window.
+            int squareSize = 100; // You can change this.
+            left = (width - squareSize) / 2;
+            top = (height - squareSize) / 2;
+            right = left + squareSize;
+            bottom = top + squareSize;
+
+            // Draw the clipping square (as a rectangle).
+            Rectangle(hdc, left, top, right + 1, bottom + 1);
+
+            EndPaint(hwnd, &ps);
+            break;
+        }
+        case WM_LBUTTONDOWN: // Left mouse button click to add polygon points.
+            points.push_back({(double)LOWORD(lp), (double)HIWORD(lp)});
+            hdc = GetDC(hwnd);
+            SetPixel(hdc, Round(points.back().x), Round(points.back().y), RGB(0, 0, 0)); // Draw the point.
+            ReleaseDC(hwnd, hdc);
+            break;
+        case WM_RBUTTONDOWN: // Right mouse button click to perform clipping.
+            if (points.size() < 3) // A polygon needs at least 3 points.
+                break;
+            hdc = GetDC(hwnd);
+            PolygonClipping(hdc, points, left, top, right, bottom); // Perform clipping.
+            ReleaseDC(hwnd, hdc);
+            points.clear(); // Clear points after clipping for a new polygon.
+            break;
+        case WM_CLOSE: // Window close message.
+            DestroyWindow(hwnd);
+            break;
+        case WM_DESTROY: // Window destroy message.
+            PostQuitMessage(0);
+            break;
+        default: // Default message handling.
+            return DefWindowProc(hwnd, m, wp, lp);
+    }
+    return 0;
+}
+
+// Entry point for the Windows application.
+int APIENTRY WinMain(HINSTANCE hi, HINSTANCE pi, LPSTR cmd, int nsh)
+{
+    WNDCLASS wc;
+    // Initialize window class structure.
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
+    wc.hbrBackground = (HBRUSH)GetStockObject(LTGRAY_BRUSH); // Light gray background.
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);              // Default arrow cursor.
+    wc.hIcon = LoadIcon(NULL, IDI_WINLOGO);                // Windows logo icon.
+    wc.lpszClassName = L"MyClass";                           // Class name.
+    wc.lpszMenuName = NULL;                                  // No menu.
+    wc.lpfnWndProc = WndProc;                                // Pointer to window procedure.
+    wc.style = CS_HREDRAW | CS_VREDRAW;                      // Redraw on horizontal/vertical resize.
+    wc.hInstance = hi;                                       // Instance handle.
+
+    // Register the window class.
+    RegisterClass(&wc);
+
+    // Create the main window.
+    HWND hwnd = CreateWindow(L"MyClass", L"Polygon Clipping Demo", WS_OVERLAPPEDWINDOW,
+                             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                             NULL, NULL, hi, 0);
+
+    // Show and update the window.
+    ShowWindow(hwnd, nsh);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    // Message loop.
+    while (GetMessage(&msg, NULL, 0, 0) > 0)
+    {
+        TranslateMessage(&msg); // Translate virtual-key messages into character messages.
+        DispatchMessage(&msg);  // Dispatch message to window procedure.
+    }
+    return 0;
+}
