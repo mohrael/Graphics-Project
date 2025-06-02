@@ -8,8 +8,9 @@
 #include <codecvt>
 #include <climits>
 #include <stack>
-
+#include <map>
 using namespace std;
+
 
 // Menu command IDs
 #define CLEAR 101
@@ -41,23 +42,38 @@ using namespace std;
 #define ELLIPSE_POLAR 506
 #define ELLIPSE_DIRECT 508
 #define ELLIPSE_MID 507
+#define LINE_POINT_CLIPPING 600
+#define POLYGON_LINE_POINT_CLIPPING 601
 
 
 
-enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves, Ellipsee};
+
+enum ShapeType { LINE ,CIRCLE , FILL, ConvexType, Curves, Ellipsee,Clip};
 enum LineAlgorithm { LINE_DDA, LINE_MIDPOINT, LINE_PARAMETRIC };
 enum EllipseAlgorithm{Ellipse_Polar,Ellipse_Direct,Ellipse_MID};
 enum CircleAlgorithm { CIRCLE_CARTESIAN, CIRCLE_POLAR ,CIRCLE_ITERPOLAR,CIRCLE_BRES , CIRCLE_MODBRES ,FILL_CIRCLE_QUARTER};
 enum FillAlgorithm { FLOOD_FILL_RECURSIVE, FLOOD_FILL_NONRECURSIVE };
 enum ConvexAlgorithm { CONVEX_FILL, NONCONVEX_FILL };
 enum CurveAlgorithm{BezierCurve, HermiteCurve,SplineCardinal };
+enum ClippingAlgorithm{Clipping1, Clipping2 };
+
 
 
 struct Point{
     int x,y;
     Point(int x=0,int y=0):x(x),y(y){};
 };
+struct Node
+{
+    double x;
+    double mi;
+    int y;
 
+    bool operator<(const Node &other) const
+    {
+        return x < other.x;
+    }
+};
 struct Shape {
     ShapeType type;
     int x1, y1, x2, y2;
@@ -77,6 +93,11 @@ struct Shape {
     int n;
     double c;
     EllipseAlgorithm currEllipseAlgo;
+    Point p1,p2;
+    int xl,xr,yt,yb;
+    vector<Point> points;
+    int left,top,right, bottom;
+    ClippingAlgorithm currClippingAlgo;
 
 };
 vector<Shape> shapes;
@@ -610,7 +631,7 @@ void DrawBezierCubicCurve(HDC hdc,double x1,double y1,double x2,double y2,double
     double v2=3*(y4-y3);
     DrawHermiteCurve(hdc,x1,y1,u1,u2,x4,y4,v1,v2,n,c);
 }
-///////////////////////////////////////////////////////
+// /////////////////////////////////////////////////////
 //17.Cardinal Spline Curve
 void cardinalSplineCurve(HDC hdc, vector<POINT> points, int n , double c, COLORREF color) {
     std::vector<Vector2> p(n);
@@ -715,6 +736,290 @@ void DrawEllipse_Midpoint(HDC hdc, int xc, int yc, int rx, int ry, COLORREF colo
         }
     }
 }
+//==================CLIPPING===============
+void edgeToTable(map<int, vector<Node>> &edgeTable, Point v1, Point v2)
+{
+    if (v1.y == v2.y)
+        return;
+
+    if (v1.y > v2.y)
+        swap(v1, v2);
+
+    if (edgeTable.find((int)v1.y) == edgeTable.end())
+        edgeTable[(int)v1.y] = vector<Node>();
+
+    edgeTable[(int)v1.y].push_back({static_cast<double>(v1.x), static_cast<double>((v2.x - v1.x) / (v2.y - v1.y)), Round(v2.y)});
+}
+void GeneralFill(HDC hdc, vector<Point> points, COLORREF fillColor)
+{
+    map<int, vector<Node>> edgeTable;
+    Point v1 = points.back();
+
+    for (const auto &v2 : points)
+    {
+        edgeToTable(edgeTable, v1, v2);
+        v1 = v2;
+    }
+
+    if (edgeTable.empty()) return; // Handle empty edge table to prevent crashes for invalid polygons
+
+    int y = edgeTable.begin()->first;
+    vector<Node> active = edgeTable[y];
+
+    while (!active.empty())
+    {
+        sort(active.begin(), active.end());
+
+        for (size_t i = 0; i + 1 < active.size(); i += 2)
+        {
+            int x1 = Round(active[i].x);
+            int x2 = Round(active[i + 1].x);
+            for (int x = x1; x <= x2; ++x)
+            {
+                SetPixel(hdc, x, y, fillColor);
+            }
+        }
+
+        ++y;
+
+        active.erase(remove_if(active.begin(), active.end(),
+                               [y](const Node &node)
+                               { return node.y <= y; }),
+                     active.end());
+
+        for (auto &node : active)
+        {
+            node.x += node.mi;
+        }
+
+        if (edgeTable.find(y) != edgeTable.end())
+        {
+            active.insert(active.end(), edgeTable[y].begin(), edgeTable[y].end());
+        }
+    }
+}
+
+Point vIntersection(Point p1, Point p2, double x)
+{
+    Point result;
+    result.x = x;
+    if (p1.x == p2.x)
+        result.y = p1.y;
+    else
+        result.y = p1.y + (p2.y - p1.y) * (x - p1.x) / (p2.x - p1.x);
+    return result;
+}
+
+Point hIntersection(Point p1, Point p2, double y)
+{
+    Point result;
+    result.y = y;
+    if (p1.y == p2.y)
+        result.x = p1.x;
+    else
+        result.x = p1.x + (p2.x - p1.x) * (y - p1.y) / (p2.y - p1.y);
+    return result;
+}
+
+void PolygonClipping(HDC hdc, vector<Point> points, int left, int top, int right, int bottom)
+{
+    GeneralFill(hdc, points, RGB(0, 0, 0)); // Draw the original polygon in black
+
+    vector<Point> result;
+    Point p1;
+
+    // Left Clipping
+    p1 = points.back();
+    for (auto &p2 : points)
+    {
+        if (p1.x >= left && p2.x >= left)
+            result.push_back(p2);
+        else if (p2.x >= left)
+        {
+            result.push_back(vIntersection(p1, p2, left));
+            result.push_back(p2);
+        }
+        else if (p1.x >= left)
+            result.push_back(vIntersection(p1, p2, left));
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Right Clipping
+    p1 = points.back();
+    for (auto &p2 : points)
+    {
+        if (p1.x <= right && p2.x <= right)
+            result.push_back(p2);
+        else if (p2.x <= right)
+        {
+            result.push_back(vIntersection(p1, p2, right));
+            result.push_back(p2);
+        }
+        else if (p1.x <= right)
+            result.push_back(vIntersection(p1, p2, right));
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Top Clipping
+    p1 = points.back();
+    for (auto &p2 : points)
+    {
+        if (p1.y >= top && p2.y >= top)
+            result.push_back(p2);
+        else if (p2.y >= top)
+        {
+            result.push_back(hIntersection(p1, p2, top));
+            result.push_back(p2);
+        }
+        else if (p1.y >= top)
+            result.push_back(hIntersection(p1, p2, top));
+        p1 = p2;
+    }
+    swap(points, result);
+    result.clear();
+
+    // Bottom Clipping
+    p1 = points.back();
+    for (auto &p2 : points)
+    {
+        if (p1.y <= bottom && p2.y <= bottom)
+            result.push_back(p2);
+        else if (p2.y <= bottom)
+        {
+            result.push_back(hIntersection(p1, p2, bottom));
+            result.push_back(p2);
+        }
+        else if (p1.y <= bottom)
+            result.push_back(hIntersection(p1, p2, bottom));
+        p1 = p2;
+    }
+
+    GeneralFill(hdc, result, RGB(255, 0, 0)); // Draw the clipped polygon in red
+}
+
+// Point clipping using Cohen–Sutherland
+bool isInsidePoint(int x, int y, int left, int top, int right, int bottom)
+{
+    return (x >= left && x <= right && y >= top && y <= bottom);
+}
+//===================================Line Clipping=========================================
+union Outcode {
+    struct {
+        unsigned left : 1;
+        unsigned right : 1;
+        unsigned top : 1;
+        unsigned bottom : 1;
+    };
+    unsigned all : 4;
+};
+
+void draw_line(const HDC hdc, const Point p1, const Point p2, const COLORREF c) {
+    const int dx = p2.x - p1.x;
+    const int dy = p2.y - p1.y;
+
+    const int steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+
+    if (steps == 0) { // Handle case of identical points
+        SetPixel(hdc, std::round(p1.x), std::round(p1.y), c);
+        return;
+    }
+
+    const float x_inc = dx / static_cast<float>(steps);
+    const float y_inc = dy / static_cast<float>(steps);
+
+    float x = p1.x;
+    float y = p1.y;
+
+    for (int i = 0; i <= steps; ++i) {
+        SetPixel(hdc, std::round(x), std::round(y), c);
+        x += x_inc;
+        y += y_inc;
+    }
+}
+
+Outcode get_outcode(const Point p, const int xl, const int xr, const int yt, const int yb) {
+    Outcode result{};
+    result.all = 0;
+
+    if (p.x < xl) result.left = 1;
+    if (p.x > xr) result.right = 1;
+    if (p.y < yt) result.top = 1;
+    if (p.y > yb) result.bottom = 1;
+
+    return result;
+}
+
+Point vIntersect(const Point p1, const Point p2, const int x_edge) {
+    Point result{};
+    result.x = x_edge;
+    if (p2.x - p1.x == 0) { // Avoid division by zero for vertical lines
+        result.y = p1.y; // Or p2.y, as x is constant
+    } else {
+        result.y = p1.y + (x_edge - p1.x) * (static_cast<double>(p2.y - p1.y) / (p2.x - p1.x));
+    }
+    return result;
+}
+
+Point hIntersect(const Point p1, const Point p2, const int y_edge) {
+    Point result{};
+    result.y = y_edge;
+    if (p2.y - p1.y == 0) { // Avoid division by zero for horizontal lines
+        result.x = p1.x; // Or p2.x, as y is constant
+    } else {
+        result.x = p1.x + (y_edge - p1.y) * (static_cast<double>(p2.x - p1.x) / (p2.y - p1.y));
+    }
+    return result;
+}
+
+void clip_line(const HDC hdc, Point p1, Point p2, const int xl, const int xr, const int yt, const int yb) {
+    Outcode out1 = get_outcode(p1, xl, xr, yt, yb);
+    Outcode out2 = get_outcode(p2, xl, xr, yt, yb);
+
+    while (true) {
+        if ((out1.all | out2.all) == 0) {
+            // Both endpoints are inside the clipping rectangle or on its boundary
+            draw_line(hdc, p1, p2, RGB(0, 0, 0)); // Draw the clipped line in black
+            return;
+        }
+        if ((out1.all & out2.all) != 0) {
+            // Both endpoints are in the same outside region (no intersection)
+            return;
+        }
+
+        Outcode out_code;
+        Point* point;
+
+        // Pick an outside point to clip
+        if (out1.all != 0) {
+            out_code = out1;
+            point = &p1;
+        } else {
+            out_code = out2;
+            point = &p2;
+        }
+
+        // Clip the line against the appropriate boundary
+        if (out_code.left) {
+            *point = vIntersect(p1, p2, xl);
+        } else if (out_code.right) {
+            *point = vIntersect(p1, p2, xr);
+        } else if (out_code.top) {
+            *point = hIntersect(p1, p2, yt);
+        } else if (out_code.bottom) {
+            *point = hIntersect(p1, p2, yb);
+        }
+
+        // Re-calculate outcodes for the modified point
+        if (point == &p1)
+            out1 = get_outcode(p1, xl, xr, yt, yb);
+        else
+            out2 = get_outcode(p2, xl, xr, yt, yb);
+    }
+}
 
 
 
@@ -727,6 +1032,7 @@ ConvexAlgorithm currConvex= CONVEX_FILL;
 CurveAlgorithm currCurveAlgo = BezierCurve;
 static int circleClickStage = 0;
 EllipseAlgorithm currEllipse=Ellipse_MID;
+ClippingAlgorithm currClip = Clipping1;
 COLORREF currentColor = RGB(0, 0, 0);
 Point ellipseCenter;
 bool waitingForndClick = false;
@@ -826,65 +1132,76 @@ void DrawShape(HDC hdc, const Shape& shape) {
 //            DrawHermiteCurve(hdc,)
         }
     }
+    else if(shape.type == Clip){
+        if(shape.currClippingAlgo == Clipping1){
+            PolygonClipping(hdc,shape.points,shape.left,shape.top,shape.right,shape.bottom);
+            clip_line(hdc,shape.p1,shape.p2,shape.xl,shape.xr,shape.yt,shape.yb);
+        }
+        else if(shape.currClippingAlgo == Clipping2){
+            clip_line(hdc,shape.p1,shape.p2,shape.xl,shape.xr,shape.yt,shape.yb);
+        }
+
+    }
+
 }
 
 
-    bool GetFileNameFromDialog(HWND hwnd, LPWSTR filename, DWORD flags, bool saveDialog = false) {
-        OPENFILENAMEW ofn = {};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = hwnd;
-        ofn.lpstrFilter = L"Binary Files\0*.dat\0All Files\0*.*\0";
-        ofn.lpstrFile = filename;
-        ofn.nMaxFile = MAX_PATH;
-        ofn.Flags = flags;
-        ofn.lpstrDefExt = L"dat";
+bool GetFileNameFromDialog(HWND hwnd, LPWSTR filename, DWORD flags, bool saveDialog = false) {
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Binary Files\0*.dat\0All Files\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = flags;
+    ofn.lpstrDefExt = L"dat";
 
-        if (saveDialog)
-            return GetSaveFileNameW(&ofn);
-        else
-            return GetOpenFileNameW(&ofn);
-    }
+    if (saveDialog)
+        return GetSaveFileNameW(&ofn);
+    else
+        return GetOpenFileNameW(&ofn);
+}
 
 
-    void SaveShapesToFile(HWND hwnd) {
-        wchar_t filename[MAX_PATH] = L"";
-        if (GetFileNameFromDialog(hwnd, filename, OFN_OVERWRITEPROMPT, true)) {
-            // Convert wide string to narrow string (UTF-8)
-            wstring_convert<codecvt_utf8<wchar_t>> converter;
-            string narrowFilename = converter.to_bytes(filename);
+void SaveShapesToFile(HWND hwnd) {
+    wchar_t filename[MAX_PATH] = L"";
+    if (GetFileNameFromDialog(hwnd, filename, OFN_OVERWRITEPROMPT, true)) {
+        // Convert wide string to narrow string (UTF-8)
+        wstring_convert<codecvt_utf8<wchar_t>> converter;
+        string narrowFilename = converter.to_bytes(filename);
 
-            ofstream out(narrowFilename, ios::binary);
-            if (!out.is_open()) return;
+        ofstream out(narrowFilename, ios::binary);
+        if (!out.is_open()) return;
 
-            size_t size = shapes.size();
-            out.write(reinterpret_cast<const char *>(&size), sizeof(size));
-            for (const auto &shape: shapes) {
-                out.write(reinterpret_cast<const char *>(&shape), sizeof(Shape));
-            }
-            out.close();
+        size_t size = shapes.size();
+        out.write(reinterpret_cast<const char *>(&size), sizeof(size));
+        for (const auto &shape: shapes) {
+            out.write(reinterpret_cast<const char *>(&shape), sizeof(Shape));
         }
+        out.close();
     }
+}
 
-    void LoadShapesFromFile(HWND hwnd) {
-        wchar_t filename[MAX_PATH] = L"";
-        if (GetFileNameFromDialog(hwnd, filename, OFN_FILEMUSTEXIST, false)) {
-            // Convert wide string to narrow string (UTF-8)
-            wstring_convert<codecvt_utf8<wchar_t>> converter;
-            string narrowFilename = converter.to_bytes(filename);
+void LoadShapesFromFile(HWND hwnd) {
+    wchar_t filename[MAX_PATH] = L"";
+    if (GetFileNameFromDialog(hwnd, filename, OFN_FILEMUSTEXIST, false)) {
+        // Convert wide string to narrow string (UTF-8)
+        wstring_convert<codecvt_utf8<wchar_t>> converter;
+        string narrowFilename = converter.to_bytes(filename);
 
-            ifstream in(narrowFilename, ios::binary);
-            if (!in.is_open()) return;
+        ifstream in(narrowFilename, ios::binary);
+        if (!in.is_open()) return;
 
-            size_t size;
-            in.read(reinterpret_cast<char *>(&size), sizeof(size));
-            shapes.resize(size);
-            for (size_t i = 0; i < size; ++i) {
-                in.read(reinterpret_cast<char *>(&shapes[i]), sizeof(Shape));
-            }
-            in.close();
-            InvalidateRect(hwnd, NULL, TRUE);  // Redraw window
+        size_t size;
+        in.read(reinterpret_cast<char *>(&size), sizeof(size));
+        shapes.resize(size);
+        for (size_t i = 0; i < size; ++i) {
+            in.read(reinterpret_cast<char *>(&shapes[i]), sizeof(Shape));
         }
+        in.close();
+        InvalidateRect(hwnd, NULL, TRUE);  // Redraw window
     }
+}
 
 bool drawingEllipse=false;
 bool fillingMode = false;
@@ -892,6 +1209,8 @@ bool drawingCircle = false;
 bool ConvexMode = false;
 bool drawingCurve=false;
 int idx=0,numPoints=6;
+bool clip1 = false;
+bool clip2 = false ;
 
 
 Vector2 *P=new Vector2[numPoints];
@@ -899,241 +1218,307 @@ COLORREF currentFillColor = RGB(255, 0, 0);
 COLORREF currentBorderColor = RGB(0, 0, 0);
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-        HDC hdc;
-        switch (msg) {
-            case WM_CREATE: {                                      //menu
-                HMENU MainMenu = CreateMenu();
-                //colors
-                HMENU Colors = CreateMenu();
-                AppendMenu(Colors, MF_STRING, BLACK, "Black");
-                AppendMenu(Colors, MF_STRING, RED, "Red");
-                AppendMenu(Colors, MF_STRING, GREEN, "Green");
-                AppendMenu(Colors, MF_STRING, BLUE, "Blue");
-                AppendMenu(Colors, MF_STRING, YELLOW, "Yellow");
-                AppendMenu(Colors, MF_STRING, PINK, "pink");
+    HDC hdc;
+    switch (msg) {
+        case WM_CREATE: {                                      //menu
+            HMENU MainMenu = CreateMenu();
+            //colors
+            HMENU Colors = CreateMenu();
+            AppendMenu(Colors, MF_STRING, BLACK, "Black");
+            AppendMenu(Colors, MF_STRING, RED, "Red");
+            AppendMenu(Colors, MF_STRING, GREEN, "Green");
+            AppendMenu(Colors, MF_STRING, BLUE, "Blue");
+            AppendMenu(Colors, MF_STRING, YELLOW, "Yellow");
+            AppendMenu(Colors, MF_STRING, PINK, "pink");
 
-                //line
-                HMENU LineAlgorithms = CreateMenu();
-                AppendMenu(LineAlgorithms, MF_STRING, DDA_LINE, "DDA");
-                AppendMenu(LineAlgorithms, MF_STRING, MIDPOINT_LINE, "Midpoint");
-                AppendMenu(LineAlgorithms, MF_STRING, PARAMETRIC_LINE, "Parametric");
-                //circle
-                HMENU CircleAlgorithms = CreateMenu();
-                AppendMenu(CircleAlgorithms, MF_STRING, CARTESIAN_CIRCLE, "Cartesian Eq Circle");
-                AppendMenu(CircleAlgorithms, MF_STRING, POLAR_CIRCLE, "Normal Polar Circle");
-                AppendMenu(CircleAlgorithms, MF_STRING, ITERPOLAR_CIRCLE, "Iterative Polar Circle");
-                AppendMenu(CircleAlgorithms, MF_STRING, BRES_CIRCLE, "Bresenham Circle");
-                AppendMenu(CircleAlgorithms, MF_STRING, MODBRES_CIRCLE, "Modified Bresenham Circle");
-                AppendMenu(CircleAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
+            //line
+            HMENU LineAlgorithms = CreateMenu();
+            AppendMenu(LineAlgorithms, MF_STRING, DDA_LINE, "DDA");
+            AppendMenu(LineAlgorithms, MF_STRING, MIDPOINT_LINE, "Midpoint");
+            AppendMenu(LineAlgorithms, MF_STRING, PARAMETRIC_LINE, "Parametric");
+            //circle
+            HMENU CircleAlgorithms = CreateMenu();
+            AppendMenu(CircleAlgorithms, MF_STRING, CARTESIAN_CIRCLE, "Cartesian Eq Circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, POLAR_CIRCLE, "Normal Polar Circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, ITERPOLAR_CIRCLE, "Iterative Polar Circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, BRES_CIRCLE, "Bresenham Circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, MODBRES_CIRCLE, "Modified Bresenham Circle");
+            AppendMenu(CircleAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
 
-                // Flood Fill
-                HMENU FillAlgorithms = CreateMenu();
-                AppendMenu(FillAlgorithms, MF_STRING, FILL_RECURSIVE, "Recursive Flood Fill");
-                AppendMenu(FillAlgorithms, MF_STRING, FILL_NONRECURSIVE, "Non-Recursive Flood Fill");
+            // Flood Fill
+            HMENU FillAlgorithms = CreateMenu();
+            AppendMenu(FillAlgorithms, MF_STRING, FILL_RECURSIVE, "Recursive Flood Fill");
+            AppendMenu(FillAlgorithms, MF_STRING, FILL_NONRECURSIVE, "Non-Recursive Flood Fill");
 //                AppendMenu(FillAlgorithms, MF_STRING, FILL_CIRCLE_QUARTER, "Fill circle");
 
-                //Convex
-                HMENU ConvexAlgorithms = CreateMenu();
-                AppendMenu(ConvexAlgorithms, MF_STRING, CONVEX, "Convex");
-                AppendMenu(ConvexAlgorithms, MF_STRING, NON_CONVEX, "Non-Convex");
+            //Convex
+            HMENU ConvexAlgorithms = CreateMenu();
+            AppendMenu(ConvexAlgorithms, MF_STRING, CONVEX, "Convex");
+            AppendMenu(ConvexAlgorithms, MF_STRING, NON_CONVEX, "Non-Convex");
 
-                //ELLIPSE
-                HMENU EllipseAlgorithms = CreateMenu();
-                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_DIRECT , "Direct Ellipse");
-                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_POLAR, "Polar Ellipse");
-                AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_MID, "Midpoint Ellipse");
+            //ELLIPSE
+            HMENU EllipseAlgorithms = CreateMenu();
+            AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_DIRECT , "Direct Ellipse");
+            AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_POLAR, "Polar Ellipse");
+            AppendMenu(EllipseAlgorithms, MF_STRING, ELLIPSE_MID, "Midpoint Ellipse");
 
-                HMENU CurveAlgorithms = CreateMenu();
-                AppendMenu(CurveAlgorithms, MF_STRING, BEZIER_CURVE, "Bezier Curve");
-                AppendMenu(CurveAlgorithms, MF_STRING, HERMITE_CURVE, "Hermite Curve");
-                AppendMenu(CurveAlgorithms, MF_STRING, CARDINAL_SPLINE, "Cardinal Spline");
+            HMENU CurveAlgorithms = CreateMenu();
+            AppendMenu(CurveAlgorithms, MF_STRING, BEZIER_CURVE, "Bezier Curve");
+            AppendMenu(CurveAlgorithms, MF_STRING, HERMITE_CURVE, "Hermite Curve");
+            AppendMenu(CurveAlgorithms, MF_STRING, CARDINAL_SPLINE, "Cardinal Spline");
 
-                //main menu
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) Colors, "Color");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) LineAlgorithms, "Line Algorithm");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)FillAlgorithms, "Flood Fill");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)ConvexAlgorithms, "Convex Algorithm");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)EllipseAlgorithms, "Ellipse Algorithm");
-                AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)CurveAlgorithms, "Curve Algorithm");
+            // clipping algorithms
+            HMENU ClippingAlgorithms = CreateMenu();
+            AppendMenu(ClippingAlgorithms, MF_STRING, 601, " clip[Point,Line,Polygon]");
+            AppendMenu(ClippingAlgorithms, MF_STRING, 600, " clip[Point, Line]");
 
-                AppendMenu(FillAlgorithms, MF_STRING, FILL_CANCEL, "Cancel Fill Mode");
 
-                AppendMenu(MainMenu, MF_STRING, 401, "Save");
-                AppendMenu(MainMenu, MF_STRING, 402, "Load");
-                AppendMenu(MainMenu, MF_STRING, CLEAR, "Clear");
+            //main menu
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) Colors, "Color");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) LineAlgorithms, "Line Algorithm");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR) CircleAlgorithms, "Circle Algorithm");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)FillAlgorithms, "Flood Fill");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)ConvexAlgorithms, "Convex Algorithm");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)EllipseAlgorithms, "Ellipse Algorithm");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)CurveAlgorithms, "Curve Algorithm");
+            AppendMenu(MainMenu, MF_POPUP, (UINT_PTR)ClippingAlgorithms, "Clipping Algorithm");
 
-                SetMenu(hwnd, MainMenu);
+            AppendMenu(FillAlgorithms, MF_STRING, FILL_CANCEL, "Cancel Fill Mode");
+
+            AppendMenu(MainMenu, MF_STRING, 401, "Save");
+            AppendMenu(MainMenu, MF_STRING, 402, "Load");
+            AppendMenu(MainMenu, MF_STRING, CLEAR, "Clear");
+
+            SetMenu(hwnd, MainMenu);
+        }
+            break;
+
+
+        case WM_COMMAND: {
+            switch (LOWORD(wp)) {
+                case CLEAR:
+                    shapes.clear();
+                    InvalidateRect(hwnd, NULL, TRUE);
+                    break;
+                case SAVE:
+                    SaveShapesToFile(hwnd);
+                    break;
+                case LOAD:
+                    LoadShapesFromFile(hwnd);
+                    InvalidateRect(hwnd, NULL, TRUE); // Redraw
+                    break;
+                case BLACK:
+                    currentColor = RGB(0, 0, 0);
+                    break;
+                case RED:
+                    currentColor = RGB(255, 0, 0);
+                    break;
+                case GREEN:
+                    currentColor = RGB(0, 255, 0);
+                    break;
+                case BLUE:
+                    currentColor = RGB(0, 0, 255);
+                    break;
+                case YELLOW:
+                    currentColor = RGB(255, 255, 0);
+                    break;
+                case PINK:
+                    currentColor = RGB(255, 192, 203);
+                    break;
+                case DDA_LINE:
+                    clip1=false;
+                    clip2=false;
+                    currentAlgo = LINE_DDA;
+                    break;
+                case MIDPOINT_LINE:
+                    clip1=false;
+                    clip2=false;
+                    currentAlgo = LINE_MIDPOINT;
+                    break;
+                case PARAMETRIC_LINE:
+                    clip1=false;
+                    clip2=false;
+                    currentAlgo = LINE_PARAMETRIC;
+                    break;
+                case CARTESIAN_CIRCLE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = CIRCLE_CARTESIAN;
+                    break;
+                case POLAR_CIRCLE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = CIRCLE_POLAR;
+                    break;
+                case ITERPOLAR_CIRCLE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = CIRCLE_ITERPOLAR;
+                    break;
+                case BRES_CIRCLE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = CIRCLE_BRES;
+                    break;
+                case MODBRES_CIRCLE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = CIRCLE_MODBRES;
+                    break;
+                case FILL_CIRCLE_QUARTER:
+                    clip1=false;
+                    clip2=false;
+                    drawingCircle = true;
+                    currentCircleAlgo = FILL_CIRCLE_QUARTER;
+                    break;
+                case FILL_RECURSIVE:
+                    clip1=false;
+                    clip2=false;
+                    currentFillAlgo = FLOOD_FILL_RECURSIVE;
+                    fillingMode = true;
+                    break;
+                case FILL_NONRECURSIVE:
+                    clip1=false;
+                    clip2=false;
+                    currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
+                    fillingMode = true;
+                    break;
+                case BEZIER_CURVE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCurve=true;
+                    currCurveAlgo = BezierCurve;
+                    break;
+
+                case HERMITE_CURVE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCurve=true;
+                    currCurveAlgo = HermiteCurve;
+                    break;
+                case CARDINAL_SPLINE:
+                    clip1=false;
+                    clip2=false;
+                    drawingCurve=true;
+                    currCurveAlgo = SplineCardinal;
+                    break;
+                case CONVEX:
+                    clip1=false;
+                    clip2=false;
+                    ConvexMode=true;
+                    currConvex=CONVEX_FILL;
+                    break;
+                case NON_CONVEX:
+                    clip1=false;
+                    clip2=false;
+                    ConvexMode=true;
+                    currConvex=NONCONVEX_FILL;
+                    break;
+                case ELLIPSE_MID:
+                    clip1=false;
+                    clip2=false;
+                    drawingEllipse= true;
+                    currEllipse=Ellipse_MID;
+                    break;
+                case ELLIPSE_POLAR:
+                    clip1=false;
+                    clip2=false;
+                    drawingEllipse= true;
+                    currEllipse=Ellipse_Polar;
+                    break;
+                case ELLIPSE_DIRECT:
+                    clip1=false;
+                    clip2=false;
+                    drawingEllipse= true;
+                    currEllipse=Ellipse_Direct;
+                    break;
+                case FILL_CANCEL:
+                    clip1=false;
+                    clip2=false;
+                    fillingMode = false;
+                    ConvexMode=false;
+                    break;
+                case POLYGON_LINE_POINT_CLIPPING:
+
+                    currClip = Clipping1;
+                    InvalidateRect(hwnd, NULL, TRUE);
+                    clip1 = true;
+                    clip2=false;
+                    break;
+                case LINE_POINT_CLIPPING:
+                    InvalidateRect(hwnd, NULL, TRUE);
+                    currClip = Clipping2;
+                    clip2=true;
+                    clip1=false;
+                    break;
             }
-                break;
+
+        }
+            break;
+            static Point polygon[5];
+            static int count = 0;
+            static int circleClickStage = 0;
+            static int left, top, right, bottom;
+            static Point p1, p2;
+            static bool draw_line_mode = false;
+            static vector<Point> polygon_points;
+        case WM_LBUTTONDOWN: {
+            int x = LOWORD(lp);
+            int y = HIWORD(lp);
 
 
-            case WM_COMMAND: {
-                switch (LOWORD(wp)) {
-                    case CLEAR:
-                        shapes.clear();
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        break;
-                    case SAVE:
-                        SaveShapesToFile(hwnd);
-                        break;
-                    case LOAD:
-                        LoadShapesFromFile(hwnd);
-                        InvalidateRect(hwnd, NULL, TRUE); // Redraw
-                        break;
-                    case BLACK:
-                        currentColor = RGB(0, 0, 0);
-                        break;
-                    case RED:
-                        currentColor = RGB(255, 0, 0);
-                        break;
-                    case GREEN:
-                        currentColor = RGB(0, 255, 0);
-                        break;
-                    case BLUE:
-                        currentColor = RGB(0, 0, 255);
-                        break;
-                    case YELLOW:
-                        currentColor = RGB(255, 255, 0);
-                        break;
-                    case PINK:
-                        currentColor = RGB(255, 192, 203);
-                        break;
-                    case DDA_LINE:
-                        currentAlgo = LINE_DDA;
-                        break;
-                    case MIDPOINT_LINE:
-                        currentAlgo = LINE_MIDPOINT;
-                        break;
-                    case PARAMETRIC_LINE:
-                        currentAlgo = LINE_PARAMETRIC;
-                        break;
-                    case CARTESIAN_CIRCLE:
-                        drawingCircle = true;
-                        currentCircleAlgo = CIRCLE_CARTESIAN;
-                        break;
-                    case POLAR_CIRCLE:
-                        drawingCircle = true;
-                        currentCircleAlgo = CIRCLE_POLAR;
-                        break;
-                    case ITERPOLAR_CIRCLE:
-                        drawingCircle = true;
-                        currentCircleAlgo = CIRCLE_ITERPOLAR;
-                        break;
-                    case BRES_CIRCLE:
-                        drawingCircle = true;
-                        currentCircleAlgo = CIRCLE_BRES;
-                        break;
-                    case MODBRES_CIRCLE:
-                        drawingCircle = true;
-                        currentCircleAlgo = CIRCLE_MODBRES;
-                        break;
-                    case FILL_CIRCLE_QUARTER:
-                        drawingCircle = true;
-                        currentCircleAlgo = FILL_CIRCLE_QUARTER;
-                        break;
-                    case FILL_RECURSIVE:
-                        currentFillAlgo = FLOOD_FILL_RECURSIVE;
-                        fillingMode = true;
-                        break;
-                    case FILL_NONRECURSIVE:
-                        currentFillAlgo = FLOOD_FILL_NONRECURSIVE;
-                        fillingMode = true;
-                        break;
-                    case BEZIER_CURVE:
-                        drawingCurve=true;
-                        currCurveAlgo = BezierCurve;
-                        break;
-                    case HERMITE_CURVE:
-                        drawingCurve=true;
-                        currCurveAlgo = HermiteCurve;
-                        break;
-                    case CARDINAL_SPLINE:
-                        drawingCurve=true;
-                        currCurveAlgo = SplineCardinal;
-                        break;
-                    case CONVEX:
-                        ConvexMode=true;
-                        currConvex=CONVEX_FILL;
-                        break;
-                    case NON_CONVEX:
-                        ConvexMode=true;
-                        currConvex=NONCONVEX_FILL;
-                        break;
-                    case ELLIPSE_MID:
-                        drawingEllipse= true;
-                        currEllipse=Ellipse_MID;
-                        break;
-                    case ELLIPSE_POLAR:
-                        drawingEllipse= true;
-                        currEllipse=Ellipse_Polar;
-                        break;
-                    case ELLIPSE_DIRECT:
-                        drawingEllipse= true;
-                        currEllipse=Ellipse_Direct;
-                        break;
-                    case FILL_CANCEL:
-                        fillingMode = false;
-                        ConvexMode=false;
-                        break;
-                }
-            }
-                break;
-                static Point polygon[5];
-                static int count = 0;
-                static int circleClickStage = 0;
-            case WM_LBUTTONDOWN: {
-                int x = LOWORD(lp);
-                int y = HIWORD(lp);
-
-
-                if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
-                    if (circleClickStage == 0) {
-                        startX = x;
-                        startY = y;
-                        circleClickStage = 1;
-                    } else if (circleClickStage == 1) {
-                        int dx = x - startX;
-                        int dy = y - startY;
-                        int radius = (int) round(sqrt(dx * dx + dy * dy));
-                        shapes.push_back(
-                                {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
-                        circleClickStage = 2;
-                    } else if (circleClickStage == 2) {
-                        // Determine quarter from mouse click relative to center
-                        int quarter = 1;
-                        if (x >= startX && y <= startY) quarter = 1;
-                        else if (x <= startX && y <= startY) quarter = 2;
-                        else if (x <= startX && y >= startY) quarter = 3;
-                        else if (x >= startX && y >= startY) quarter = 4;
-                        // Update last shape
-                        shapes.back().quarter = quarter;
-                        circleClickStage = 0;
-                        drawingCircle = false;
-                        InvalidateRect(hwnd, NULL, TRUE);
-                    }
-                }
-                else if (fillingMode) {
-                    hdc = GetDC(hwnd);
-                    COLORREF borderColor = GetPixel(hdc, x, y);
+            if (drawingCircle && currentCircleAlgo == FILL_CIRCLE_QUARTER) {
+                if (circleClickStage == 0) {
+                    startX = x;
+                    startY = y;
+                    circleClickStage = 1;
+                } else if (circleClickStage == 1) {
+                    int dx = x - startX;
+                    int dy = y - startY;
+                    int radius = (int) round(sqrt(dx * dx + dy * dy));
                     shapes.push_back(
-                            {FILL, x, y, 0, 0, RGB(0, 0, 0), LINE_DDA, CIRCLE_CARTESIAN, currentFillColor, borderColor,
-                             1, currentFillAlgo});
+                            {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
+                    circleClickStage = 2;
+                } else if (circleClickStage == 2) {
+                    // Determine quarter from mouse click relative to center
+                    int quarter = 1;
+                    if (x >= startX && y <= startY) quarter = 1;
+                    else if (x <= startX && y <= startY) quarter = 2;
+                    else if (x <= startX && y >= startY) quarter = 3;
+                    else if (x >= startX && y >= startY) quarter = 4;
+                    // Update last shape
+                    shapes.back().quarter = quarter;
+                    circleClickStage = 0;
+                    drawingCircle = false;
+                    InvalidateRect(hwnd, NULL, TRUE);
                 }
-                else if (ConvexMode){
-                    polygon[count].x = LOWORD(lp);
-                    polygon[count].y = HIWORD(lp);
-                    if (count ==4)
-                    {
-                        hdc = GetDC(hwnd);
-                        drawConvex(hdc, polygon, 5, currentColor);
-                        ReleaseDC(hwnd, hdc);
-                        count = 0;
-                    }
-                    else {
-                        count++;
-                    }
+            }
+            else if (fillingMode) {
+                hdc = GetDC(hwnd);
+                COLORREF borderColor = GetPixel(hdc, x, y);
+                shapes.push_back(
+                        {FILL, x, y, 0, 0, RGB(0, 0, 0), LINE_DDA, CIRCLE_CARTESIAN, currentFillColor, borderColor,
+                         1, currentFillAlgo});
+            }
+            else if (ConvexMode){
+                polygon[count].x = LOWORD(lp);
+                polygon[count].y = HIWORD(lp);
+                if (count ==4)
+                {
+                    hdc = GetDC(hwnd);
+                    drawConvex(hdc, polygon, 5, currentColor);
+                    ReleaseDC(hwnd, hdc);
+                    count = 0;
                 }
+                else {
+                    count++;
+                }
+            }
 //                else if(currEllipse){
 //                    if (!waitingForndClick) {
 //                        startX = LOWORD(lp);
@@ -1157,99 +1542,213 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //                    waitingForSecondClick = false;
 //                    InvalidateRect(hwnd, NULL, TRUE);
 //                }
-                else if(drawingCurve){
-                    if(idx<numPoints)
-                    {
-                        P[idx].x=LOWORD(lp);
-                        P[idx].y=HIWORD(lp);
-                        idx++;
-                    }
-                    else {
-                        idx=0;
-                        hdc = GetDC(hwnd);
-                        std::vector<POINT> pointVec;
-                        for (int i = 0; i < numPoints; ++i) {
-                            POINT pt;
-                            pt.x = static_cast<LONG>(P[i].x);
-                            pt.y = static_cast<LONG>(P[i].y);
-                            pointVec.push_back(pt);
-                        }
-                        Shape s;
-                        s.type = Curves;
-                        s.currCurveAlgo = SplineCardinal;
-                        s.P = pointVec;
-                        s.n = numPoints;
-
-                        s.c = 1.0; // or any tension value you want
-                        s.color = currentColor;
-                        shapes.push_back(s);
-                        ReleaseDC(hwnd, hdc);
-                        InvalidateRect(hwnd, NULL, TRUE);
-                        drawingCurve= false;
-                    }
-
+            else if(drawingCurve){
+                if(idx<numPoints)
+                {
+                    P[idx].x=LOWORD(lp);
+                    P[idx].y=HIWORD(lp);
+                    idx++;
                 }
                 else {
-                    if (!waitingForSecondClick) {
-                        startX = x;
-                        startY = y;
-                        waitingForSecondClick = true;
-                    } else {
-                        if (drawingCircle) {
-                            int dx = x - startX;
-                            int dy = y - startY;
-                            int radius = (int) round(sqrt(dx * dx + dy * dy));
-                            shapes.push_back(
-                                    {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
-                            drawingCircle = false;
-                        }
-                        else if(drawingEllipse){
-                            int rx = abs(x - startX);
-                            int ry = abs(y - startY);
-
-                            Shape ellipseShape;
-                            ellipseShape.type = Ellipsee;
-                            ellipseShape.x1 = startX;
-                            ellipseShape.y1 = startY;
-                            ellipseShape.rx = rx;
-                            ellipseShape.ry = ry;
-                            ellipseShape.color = currentColor;  // or ellipseShape.currColor
-                            ellipseShape.currEllipseAlgo = currEllipse;
-                            shapes.push_back(ellipseShape);
-                            drawingEllipse = false;
-
-                        }
-                        else {
-                            shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
-                        }
-                        waitingForSecondClick = false;
-                        InvalidateRect(hwnd, NULL, TRUE);
+                    idx=0;
+                    hdc = GetDC(hwnd);
+                    std::vector<POINT> pointVec;
+                    for (int i = 0; i < numPoints; ++i) {
+                        POINT pt;
+                        pt.x = static_cast<LONG>(P[i].x);
+                        pt.y = static_cast<LONG>(P[i].y);
+                        pointVec.push_back(pt);
                     }
+                    Shape s;
+                    s.type = Curves;
+                    s.currCurveAlgo = SplineCardinal;
+                    s.P = pointVec;
+                    s.n = numPoints;
 
+                    s.c = 1.0; // or any tension value you want
+                    s.color = currentColor;
+                    shapes.push_back(s);
+                    ReleaseDC(hwnd, hdc);
+                    InvalidateRect(hwnd, NULL, TRUE);
+                    drawingCurve= false;
+                }
+
+            }
+            else if(clip1){
+                polygon_points.push_back({ LOWORD(lp),  HIWORD(lp)}); // Fix here
+                hdc = GetDC(hwnd);
+                SetPixel(hdc, Round(polygon_points.back().x), Round(polygon_points.back().y), RGB(0, 0, 0));
+                ReleaseDC(hwnd, hdc);
+                break;
+            }
+            else if(clip2){
+                if (!draw_line_mode) {
+                    p1 = { LOWORD(lp), HIWORD(lp) };
+                    draw_line_mode = true;
+                } else {
+                    p2 = { LOWORD(lp), HIWORD(lp) };
+                    HDC hdc = GetDC(hwnd);
+                    clip_line(hdc, p1, p2, left, right, top, bottom);
+                    draw_line_mode = false;
+                    ReleaseDC(hwnd, hdc);
+                }
+                break;
+            }
+            else {
+                if (!waitingForSecondClick) {
+                    startX = x;
+                    startY = y;
+                    waitingForSecondClick = true;
+                } else {
+                    if (drawingCircle) {
+                        int dx = x - startX;
+                        int dy = y - startY;
+                        int radius = (int) round(sqrt(dx * dx + dy * dy));
+                        shapes.push_back(
+                                {CIRCLE, startX, startY, radius, 0, currentColor, currentAlgo, currentCircleAlgo});
+                        drawingCircle = false;
+                    }
+                    else if(drawingEllipse){
+                        int rx = abs(x - startX);
+                        int ry = abs(y - startY);
+
+                        Shape ellipseShape;
+                        ellipseShape.type = Ellipsee;
+                        ellipseShape.x1 = startX;
+                        ellipseShape.y1 = startY;
+                        ellipseShape.rx = rx;
+                        ellipseShape.ry = ry;
+                        ellipseShape.color = currentColor;  // or ellipseShape.currColor
+                        ellipseShape.currEllipseAlgo = currEllipse;
+                        shapes.push_back(ellipseShape);
+                        drawingEllipse = false;
+
+                    }
+                    else {
+                        shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
+                    }
+                    waitingForSecondClick = false;
+                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+
+            }
+        }
+        case WM_LBUTTONDBLCLK: {
+            if(clip1) {
+                if (!draw_line_mode) {
+                    p1 = { LOWORD(lp),  HIWORD(lp)}; // Fix here
+                    draw_line_mode = true;
+                } else {
+                    p2 = { LOWORD(lp), HIWORD(lp)}; // Fix here
+                    HDC hdc = GetDC(hwnd);
+                    clip_line(hdc, p1, p2, left, right, top, bottom);
+                    draw_line_mode = false;
+                    ReleaseDC(hwnd, hdc);
+                }
+                polygon_points.clear();
+                break;
+            }
+        }
+        case WM_RBUTTONDOWN: {
+            if(clip1){
+                if (polygon_points.size() < 3) {
+                    break;
+                } else {
+                    hdc = GetDC(hwnd);
+                    PolygonClipping(hdc, polygon_points, left, top, right, bottom);
+                    ReleaseDC(hwnd, hdc);
+                    polygon_points.clear();
+                    break;
                 }
             }
+            else if(clip2){
+                Point p = { LOWORD(lp), HIWORD(lp) };
+                if (p.x >= left && p.x <= right && p.y >= top && p.y <= bottom) {
+                    HDC hdc = GetDC(hwnd);
+                    SetPixel(hdc, p.x, p.y, RGB(255, 0, 0));
+                    ReleaseDC(hwnd, hdc);
+                }
+                break;
+            }
+        }
+        case WM_MBUTTONDOWN:
+        {
+            if(clip1){
+                int x = LOWORD(lp);
+                int y = HIWORD(lp);
+                if (isInsidePoint(x, y, left, top, right, bottom)) {
+                    hdc = GetDC(hwnd);
+                    SetPixel(hdc, x, y, RGB(0, 0, 0));
+                    ReleaseDC(hwnd, hdc);
+                }
+                break;
+            }
+        }
             break;
 
-            case WM_PAINT: {
-                PAINTSTRUCT ps;
-                hdc = BeginPaint(hwnd, &ps);
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            hdc = BeginPaint(hwnd, &ps);
+            if(clip1){
+
+
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+                int width = rect.right - rect.left;
+                int height = rect.bottom - rect.top;
+
+                int clipWidth = 600;
+                int clipHeight = 400;
+                left = (width - clipWidth) / 2;
+                top = (height - clipHeight) / 2;
+                right = left + clipWidth;
+                bottom = top + clipHeight;
+
+                // Draw the clipping rectangle
+                Rectangle(hdc, left, top, right + 1, bottom + 1);
+
+                EndPaint(hwnd, &ps);
+                break;
+            }
+            else if(clip2){
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+
+                int width = rect.right - rect.left;
+                int height = rect.bottom - rect.top;
+
+                const int square_size = 400;
+
+                left = (width - square_size) / 2;
+                top = (height - square_size) / 2;
+                right = left + square_size;
+                bottom = top + square_size;
+
+                Rectangle(hdc, left, top, right + 1, bottom + 1);
+
+                EndPaint(hwnd, &ps);
+                break;
+            }
+            else{
                 for (auto &shape: shapes) {
                     DrawShape(hdc, shape);
                 }
                 EndPaint(hwnd, &ps);
             }
-                break;
-            case WM_CLOSE:
-                DestroyWindow(hwnd);
-                break;
-            case WM_DESTROY:
-                PostQuitMessage(0);
-                break;
-            default:
-                return DefWindowProc(hwnd, msg, wp, lp);
         }
-        return 0;
+            break;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            break;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            break;
+        default:
+            return DefWindowProc(hwnd, msg, wp, lp);
     }
+    return 0;
+}
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     WNDCLASS wc = {};                   //window class (window type)
@@ -1261,7 +1760,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     wc.lpszClassName = "MyClass";                     //L means this is unicode string
     wc.lpszMenuName = NULL;
     wc.lpfnWndProc = WndProc;                 //msg handler(by default)
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW| CS_DBLCLKS;
     wc.hInstance = hInstance;
     if (!RegisterClass(&wc)) {
         MessageBox(NULL, "Window Registration Failed!", "Error", MB_ICONERROR);
