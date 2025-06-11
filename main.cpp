@@ -9,6 +9,8 @@
 #include <climits>
 #include <stack>
 #include <map>
+#include <iostream>
+
 using namespace std;
 
 
@@ -93,7 +95,7 @@ struct Shape {
     int n;
     double c;
     EllipseAlgorithm currEllipseAlgo;
-    Point p1,p2;
+    Point p1,p2,p3;
     int xl,xr,yt,yb;
     vector<Point> points;
     int left,top,right, bottom;
@@ -484,7 +486,7 @@ struct Edge{
 vector<Edge>edgeTable[1000];
 vector<Edge>activeEdgeTable;
 
-void buildEdgeTable(Point polygon[],int n){
+void buildEdgeTable(const Point *polygon,int n){
     for (int i = 0; i < 1000; ++i) edgeTable[i].clear();
     for (int i = 0; i < n; ++i) {
         Point p1=polygon[i];
@@ -498,7 +500,7 @@ void buildEdgeTable(Point polygon[],int n){
     }
 }
 
-void nonConvex(HDC hdc, Point polygon[], int n, COLORREF c){
+void nonConvex(HDC hdc, const Point *polygon, int n, COLORREF c){
     buildEdgeTable(polygon ,n);
     int y=0;
     while (y < 1000 && edgeTable[y].empty()) y++; // find first non-empty scanline
@@ -631,24 +633,6 @@ double operator*(Vector4 &v1,Vector4& v2)
     return v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2]+v1[3]*v2[3];
 }
 
-void DrawHermiteCurve(HDC hdc,double x1,double y1,double u1,double u2,double x2,double y2,double v1,double v2,int n,COLORREF c)
-{
-    double dt=1.0/n;
-    Vector4 Gx(x1,u1,x2,u2);
-    Vector4 Gy(y1,v1,y2,v2);
-    Matrix4 m(1,0,0,0,0,1,0,0,-3,-2,3,-1,2,1,-2,1);
-    Vector4 Vx(m*Gx);
-    Vector4 Vy(m*Gy);
-    double x,y;
-    for(double t=0; t<1; t+=dt)
-    {
-        Vector4 Vt(1,t,t*t,t*t*t);
-        x=Vt*Vx;
-        y=Vt*Vy;
-        SetPixel(hdc,Round(x),Round(y),c);
-
-    }
-}
 void DrawHermiteCurve2(HDC hdc,Vector2& P1,Vector2& T1,Vector2& P2,Vector2& T2,int n,COLORREF c)
 {
 //    double dt=1.0/n;
@@ -668,15 +652,96 @@ void DrawHermiteCurve2(HDC hdc,Vector2& P1,Vector2& T1,Vector2& P2,Vector2& T2,i
     }
 }
 
-
-void DrawBezierCubicCurve(HDC hdc,double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4,int n,COLORREF c)
-{
-    double u1=3*(x2-x1);
-    double v1=3*(y2-y1);
-    double u2=3*(x4-x3);
-    double v2=3*(y4-y3);
-    DrawHermiteCurve(hdc,x1,y1,u1,u2,x4,y4,v1,v2,n,c);
+int determineQuarter(Point center, Point clicked) {
+    if (clicked.x >= center.x && clicked.y <= center.y) return 1; // Top-right
+    if (clicked.x <= center.x && clicked.y <= center.y) return 2; // Top-left
+    if (clicked.x <= center.x && clicked.y >= center.y) return 3; // Bottom-left
+    return 4; // Bottom-right
 }
+
+void generateCircleQuarter(Point center, int radius, int segments, int quarter, vector<Point>& points) {
+    double startAngle = 0, endAngle = 0;
+    switch (quarter) {
+        case 1: startAngle = 0; endAngle = M_PI / 2; break;           // 0° to 90°
+        case 2: startAngle = M_PI / 2; endAngle = M_PI; break;        // 90° to 180°
+        case 3: startAngle = M_PI; endAngle = 3 * M_PI / 2; break;    // 180° to 270°
+        case 4: startAngle = 3 * M_PI / 2; endAngle = 2 * M_PI; break;// 270° to 360°
+    }
+
+    double angleStep = (endAngle - startAngle) / segments;
+    for (int i = 0; i <= segments; ++i) {
+        double angle = startAngle + i * angleStep;
+        int x = center.x + (int)(radius * cos(angle));
+        int y = center.y - (int)(radius * sin(angle)); // y is flipped in Win32
+        points.push_back(Point(x, y));
+    }
+
+    // Add the center to close the quarter (making it a fan shape)
+    points.push_back(center);
+}
+
+float H1(float t) { return 2*t*t*t - 3*t*t + 1; }
+float H2(float t) { return -2*t*t*t + 3*t*t; }
+float H3(float t) { return t*t*t - 2*t*t + t; }
+float H4(float t) { return t*t*t - t*t; }
+
+Point Hermite(Point p0, Point p1, Point r0, Point r1, float t) {
+    Point result;
+    result.x = H1(t)*p0.x + H2(t)*p1.x + H3(t)*r0.x + H4(t)*r1.x;
+    result.y = H1(t)*p0.y + H2(t)*p1.y + H3(t)*r0.y + H4(t)*r1.y;
+    return result;
+}
+void FillSquareWithHermite(HDC hdc, Point topLeft, Point bottomRight) {
+    int steps = 100;
+    Point p0 = {topLeft.x, topLeft.y};
+    Point p1 = {topLeft.x, bottomRight.y};
+    Point q0 = {bottomRight.x, topLeft.y};
+    Point q1 = {bottomRight.x, bottomRight.y};
+
+    Point r0 = {0, 100}; // vertical tangent vector
+    Point r1 = {0, 100}; // same for bottom
+
+    for (int i = 0; i <= steps; i++) {
+        float t = i / (float)steps;
+        Point a = Hermite(p0, p1, r0, r1, t); // left edge
+        Point b = Hermite(q0, q1, r0, r1, t); // right edge
+        DDAline(hdc, a.x,a.y, b.x,b.y, RGB(0, 0, 255)); // draw horizontal line
+    }
+}
+Point Bezier(Point p0, Point p1, Point p2, Point p3, float t) {
+    float u = 1 - t;
+    Point p;
+    p.x = u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x;
+    p.y = u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y;
+    return p;
+}
+
+void FillRectangleWithBezier(HDC hdc, Point topLeft, Point bottomRight) {
+    int steps = 100;
+    int height = bottomRight.y - topLeft.y;
+
+    for (int i = 0; i <= steps; i++) {
+        float t = i / (float)steps;
+        int y = topLeft.y + t * height;
+
+        // Control points for Bézier curve (horizontal line)
+        Point p0 = {topLeft.x, y};
+        Point p1 = {topLeft.x + (bottomRight.x - topLeft.x) / 3, y - 20};
+        Point p2 = {topLeft.x + 2 * (bottomRight.x - topLeft.x) / 3, y + 20};
+        Point p3 = {bottomRight.x, y};
+
+        // Draw curve
+        Point prev = p0;
+        for (int j = 1; j <= steps; j++) {
+            float tj = j / (float)steps;
+            Point curr = Bezier(p0, p1, p2, p3, tj);
+            DDAline(hdc, prev.x,prev.y, curr.x,curr.y, RGB(255, 0, 0));
+            prev = curr;
+        }
+    }
+}
+
+
 // /////////////////////////////////////////////////////
 //17.Cardinal Spline Curve
 void cardinalSplineCurve(HDC hdc, vector<POINT> points, int n , double c, COLORREF color) {
@@ -1019,6 +1084,7 @@ Point hIntersect(const Point p1, const Point p2, const int y_edge) {
         result.x = p1.x + (y_edge - p1.y) * (static_cast<double>(p2.x - p1.x) / (p2.y - p1.y));
     }
     return result;
+
 }
 
 void clip_line(const HDC hdc, Point p1, Point p2, const int xl, const int xr, const int yt, const int yb) {
@@ -1166,20 +1232,21 @@ void DrawShape(HDC hdc, const Shape& shape) {
             drawConvex(hdc, shape.point.data(), shape.n, shape.fillColor);
         }
         else if(shape.convexAlgo == NONCONVEX_FILL){
-            nonConvex(hdc, pts, shape.n, shape.fillColor);
+            nonConvex(hdc, shape.point.data(), shape.n, shape.fillColor);
         }
-        delete[] pts;
 
     }
 
     else if(shape.type == Curves){
         if(shape.currCurveAlgo == SplineCardinal){
             cardinalSplineCurve(hdc, shape.P, shape.n, shape.c, shape.color);
-//            DrawBezierCubicCurve(hdc,shape.x1,shape.y1,shape.x2,shape.y2,shape.x3,shape.y3,shape.x4,shape.y4,4,shape.color);
-
         }
         else if(shape.currCurveAlgo == HermiteCurve){
-//            DrawHermiteCurve(hdc,)
+            FillSquareWithHermite(hdc, shape.p1, shape.p2);
+        }
+        else if(shape.currCurveAlgo==BezierCurve){
+            FillRectangleWithBezier(hdc, shape.p1, shape.p2);
+
         }
     }
     else if(shape.type == Clip){
@@ -1451,7 +1518,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     drawingCurve=true;
                     currCurveAlgo = BezierCurve;
                     break;
-
                 case HERMITE_CURVE:
                     clip1=false;
                     clip2=false;
@@ -1501,7 +1567,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     ConvexMode=false;
                     break;
                 case POLYGON_LINE_POINT_CLIPPING:
-
                     currClip = Clipping1;
                     InvalidateRect(hwnd, NULL, TRUE);
                     clip1 = true;
@@ -1524,9 +1589,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             static Point p1, p2;
             static bool draw_line_mode = false;
             static vector<Point> polygon_points;
+            static Point tempPoint;
+            static bool isFirstClick = true;
         case WM_LBUTTONDOWN: {
             int x = LOWORD(lp);
             int y = HIWORD(lp);
+            int a,b;
 
 
             if (drawingCircle && (currentCircleAlgo == FILL_CIRCLE_QUARTER || currentCircleAlgo== FILL_CIRCLE_WITH_CIRCLES)) {
@@ -1563,74 +1631,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                          1, currentFillAlgo});
             }
             else if (ConvexMode){
+//                hdc=GetDC(hwnd);
                 polygon[count].x = LOWORD(lp);
                 polygon[count].y = HIWORD(lp);
                 if (count ==4)
                 {
                     hdc = GetDC(hwnd);
                     drawConvex(hdc, polygon, 5, currentColor);
-                    ReleaseDC(hwnd, hdc);
                     count = 0;
+                    ConvexMode= false;
+//                    ReleaseDC(hwnd, hdc);
                 }
                 else {
                     count++;
                 }
-            }
-//                else if(currEllipse){
-//                    if (!waitingForndClick) {
-//                        startX = LOWORD(lp);
-//                        startY = HIWORD(lp);
-//                        waitingForndClick = true;
-//                    } else {
-//                        int rx = abs(startX - x);
-//                        int ry = abs(startY-y);
-//
-//                        Shape ellipseShape;
-//                        ellipseShape.type = Ellipsee;
-//                        ellipseShape.x1 = startX;
-//                        ellipseShape.y1 = startY;
-//                        ellipseShape.rx = rx;
-//                        ellipseShape.ry = ry;
-//                        ellipseShape.color = currentColor;
-//                        ellipseShape.currEllipseAlgo = currEllipse;
-//                        shapes.push_back(ellipseShape);
-//                        drawingEllipse = false;
-//                    }
-//                    waitingForSecondClick = false;
-//                    InvalidateRect(hwnd, NULL, TRUE);
-//                }
-            else if(drawingCurve){
-                if(idx<numPoints)
-                {
-                    P[idx].x=LOWORD(lp);
-                    P[idx].y=HIWORD(lp);
-                    idx++;
-                }
-                else {
-                    idx=0;
-                    hdc = GetDC(hwnd);
-                    std::vector<POINT> pointVec;
-                    for (int i = 0; i < numPoints; ++i) {
-                        POINT pt;
-                        pt.x = static_cast<LONG>(P[i].x);
-                        pt.y = static_cast<LONG>(P[i].y);
-                        pointVec.push_back(pt);
-                    }
-                    Shape s;
-                    s.type = Curves;
-                    s.currCurveAlgo = SplineCardinal;
-                    s.P = pointVec;
-                    s.n = numPoints;
-
-                    s.c = 1.0; // or any tension value you want
-                    s.color = currentColor;
-                    shapes.push_back(s);
-                    ReleaseDC(hwnd, hdc);
-                    InvalidateRect(hwnd, NULL, TRUE);
-                    drawingCurve= false;
-                }
 
             }
+            else  if (currCurveAlgo == SplineCardinal) {
+                  if (idx < numPoints) {
+                      P[idx].x = LOWORD(lp);
+                      P[idx].y = HIWORD(lp);
+                      idx++;
+                  } else {
+                      idx = 0;
+                      hdc = GetDC(hwnd);
+                      std::vector<POINT> pointVec;
+                      for (int i = 0; i < numPoints; ++i) {
+                          POINT pt;
+                          pt.x = static_cast<LONG>(P[i].x);
+                          pt.y = static_cast<LONG>(P[i].y);
+                          pointVec.push_back(pt);
+                      }
+                      Shape s;
+                      s.type = Curves;
+                      s.currCurveAlgo = SplineCardinal;
+                      s.P = pointVec;
+                      s.n = numPoints;
+
+                      s.c = 1.0; // or any tension value you want
+                      s.color = currentColor;
+                      shapes.push_back(s);
+                      ReleaseDC(hwnd, hdc);
+                      InvalidateRect(hwnd, NULL, TRUE);
+                  }
+
+
+              drawingCurve = false;
+          }
             else if(clip1){
                 polygon_points.push_back({ LOWORD(lp),  HIWORD(lp)}); // Fix here
                 hdc = GetDC(hwnd);
@@ -1679,7 +1726,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         ellipseShape.currEllipseAlgo = currEllipse;
                         shapes.push_back(ellipseShape);
                         drawingEllipse = false;
-
+                    }
+                    else if(drawingCurve) {
+                        if (currCurveAlgo == HermiteCurve) {
+//                        hdc = GetDC(hwnd);
+                            p1 = {startX, startY};
+                            p2 = {x, y};
+                            int size = min(abs(p2.x - p1.x), abs(p2.y - p1.y));
+                            if (p2.x < p1.x) size = -size;
+                            Point p3 = {p1.x + size, p1.y + size};
+                            Shape s;
+                            s.type = Curves;
+                            s.p1 = p1;
+                            s.p2 = p3;
+                            s.color = currentColor;
+                            s.currCurveAlgo = HermiteCurve;
+                            shapes.push_back(s);
+                            drawingCurve = false;
+                        } else if (currCurveAlgo == BezierCurve) {
+//                        hdc = GetDC(hwnd);
+                            p1 = {startX, startY};
+                            p2 = {x, y};
+                            int size = min(abs(p2.x - p1.x), abs(p2.y - p1.y));
+                            if (p2.x < p1.x) size = -size;
+                            Point p3 = {p1.x + size, p1.y + size};
+                            Shape s;
+                            s.type = Curves;
+                            s.p1 = p1;
+                            s.p2 = p2;
+                            s.color = currentColor;
+                            s.currCurveAlgo = BezierCurve;
+                            shapes.push_back(s);
+                            drawingCurve = false;
+                        }
                     }
                     else {
                         shapes.push_back({LINE, startX, startY, x, y, currentColor, currentAlgo});
